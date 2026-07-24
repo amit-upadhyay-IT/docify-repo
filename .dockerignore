@@ -1,0 +1,24 @@
+# Keep the build context minimal: only the source needed to compile the binary reaches the
+# build stage. The runtime stage copies just the binary, so none of this affects the final
+# image, but a lean context keeps builds fast and avoids copying design docs or tooling into
+# build layers. Nothing here is required by `go build ./cmd/docify-repo` (the embedded prompt
+# bundle lives under internal/prompt and is retained).
+.git
+.github
+.idea
+.claude
+
+# Generated documentation and committed state are tool outputs, never build inputs.
+docs/generated
+.docify
+
+# Human-facing documentation and planning material are not needed to build the binary.
+docs
+DESIGN.md
+IMPLEMENTATION_PLAN.md
+README.md
+
+# CI and release tooling that must never be copied into the image.
+scripts
+Dockerfile
+.dockerignore

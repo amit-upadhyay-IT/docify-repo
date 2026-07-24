@@ -1,0 +1,184 @@
+# Release pipeline for the docify-repo container image.
+#
+# Triggered by an annotated semantic-version tag (for example v0.1.0). It builds a
+# multi-architecture image for linux/amd64 and linux/arm64, pushes it to GHCR addressed by its
+# immutable digest, attaches an SBOM and SLSA provenance, scans it for vulnerabilities, signs
+# the digest with keyless cosign, records the compressed image size against a regression gate,
+# and verifies the runtime invariants on both architectures.
+#
+# Pin every action below to an immutable @sha256 digest before production use; the human-facing
+# tags here keep the reference readable. See docs/releasing.md.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  # Fail the size gate if the largest single-architecture compressed image exceeds this many
+  # bytes. The design targets well under 30 MB for the base image; this is a regression ceiling,
+  # not a promise. Raise it deliberately, in review, when a dependency legitimately grows.
+  IMAGE_SIZE_LIMIT_BYTES: "41943040" # 40 MiB
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      id-token: write # keyless cosign signing via the GitHub OIDC provider
+      attestations: write # SLSA build provenance attestation
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Immutable, human-meaningful tags derived from the git tag. latest is intentionally
+          # omitted so a pull never silently moves to a newer build.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - name: Build and push (linux/amd64, linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          # Buildx attaches a per-architecture SBOM and max-mode SLSA provenance to the pushed
+          # manifest so consumers can inspect and verify them from the registry.
+          sbom: true
+          provenance: mode=max
+          # Reproducible layer timestamps keyed to the source revision.
+          outputs: type=image,rewrite-timestamp=true
+
+      - name: Generate downloadable SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          artifact-name: docify-repo.spdx.json
+          output-file: docify-repo.spdx.json
+
+      - name: Vulnerability scan
+        uses: anchore/scan-action@v6
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          # Fail the release on fixable high or critical vulnerabilities.
+          severity-cutoff: high
+          fail-build: true
+          only-fixed: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image digest (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_EXPERIMENTAL: "1"
+        run: cosign sign --yes "${IMAGE_NAME}@${DIGEST}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Report compressed image size
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="${IMAGE_NAME}@${DIGEST}"
+          {
+            echo "### Image size (compressed layers)"
+            echo
+            echo "| Platform | Bytes | Human |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          limit="${IMAGE_SIZE_LIMIT_BYTES}"
+          over=0
+          for platform in linux/amd64 linux/arm64; do
+            os="${platform%/*}"
+            arch="${platform#*/}"
+            # Resolve the per-platform manifest from the multi-arch index and sum its layer sizes.
+            manifest_digest="$(docker buildx imagetools inspect "$ref" --raw \
+              | jq -r --arg os "$os" --arg arch "$arch" \
+                '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest')"
+            size="$(docker buildx imagetools inspect "${IMAGE_NAME}@${manifest_digest}" --raw \
+              | jq '[.layers[].size] | add')"
+            human="$(numfmt --to=iec "$size")"
+            echo "| ${platform} | ${size} | ${human} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "compressed size ${platform}: ${size} bytes (${human}); limit ${limit} bytes"
+            if [ "$size" -gt "$limit" ]; then
+              over=1
+              echo "::error::${platform} compressed image size ${size} exceeds limit ${limit}"
+            fi
+          done
+          [ "$over" -eq 0 ]
+
+  image-checks:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run image checks on ${{ matrix.platform }}
+        run: |
+          docker pull --platform "${{ matrix.platform }}" "${IMAGE_NAME}@${{ needs.build.outputs.digest }}"
+          scripts/image-checks.sh "${IMAGE_NAME}@${{ needs.build.outputs.digest }}" "${{ matrix.platform }}"

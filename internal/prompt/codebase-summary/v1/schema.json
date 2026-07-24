@@ -1,0 +1,327 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v1/component-dossier",
+  "title": "component_dossier",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "purpose",
+    "source_paths",
+    "architecture",
+    "interfaces",
+    "data_models",
+    "workflows",
+    "dependencies",
+    "review_gaps",
+    "diagrams"
+  ],
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "purpose": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "source_paths": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+    },
+    "architecture": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/architecture_item" }
+    },
+    "interfaces": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/interface_item" }
+    },
+    "data_models": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/data_model_item" }
+    },
+    "workflows": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/workflow_item" }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/dependency_item" }
+    },
+    "review_gaps": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/review_gap" }
+    },
+    "diagrams": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "anyOf": [
+          { "$ref": "#/$defs/flowchart" },
+          { "$ref": "#/$defs/sequence" },
+          { "$ref": "#/$defs/class_diagram" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "source_paths": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+    },
+    "architecture_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "description", "source_paths"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "interface_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "direction", "description", "source_paths"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": {
+          "type": "string",
+          "enum": ["http_api", "rpc", "function", "method", "interface", "event", "command", "schema", "configuration", "other"]
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["inbound", "outbound", "internal"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "data_model_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "description", "fields", "relationships", "source_paths"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": {
+          "type": "string",
+          "enum": ["entity", "value_object", "request", "response", "event", "schema", "table", "configuration", "other"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "fields": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/data_field" }
+        },
+        "relationships": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/data_relationship" }
+        },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "data_field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
+    "data_relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "kind", "description"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": {
+          "type": "string",
+          "enum": ["contains", "references", "inherits", "implements", "reads", "writes", "other"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
+    "workflow_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "steps", "source_paths"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "steps": {
+          "type": "array",
+          "maxItems": 200,
+          "items": { "$ref": "#/$defs/workflow_step" }
+        },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "workflow_step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "action", "target"],
+      "properties": {
+        "actor": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "action": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "target": { "type": ["string", "null"], "maxLength": 200 }
+      }
+    },
+    "dependency_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "purpose", "component_key", "source_paths"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "kind": {
+          "type": "string",
+          "enum": ["internal_component", "external_service", "library", "tool", "protocol", "other"]
+        },
+        "purpose": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "component_key": { "type": ["string", "null"], "maxLength": 512 },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "review_gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "description", "recommendation", "source_paths"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["uncertainty", "missing_context", "inconsistency", "unsupported_construct", "excluded_input", "other"]
+        },
+        "description": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "recommendation": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "diagram_source_paths": { "$ref": "#/$defs/source_paths" },
+    "flowchart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "nodes", "edges", "source_paths"],
+      "properties": {
+        "type": { "type": "string", "const": "flowchart" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "nodes": {
+          "type": "array",
+          "maxItems": 60,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 200 }
+            }
+          }
+        },
+        "edges": {
+          "type": "array",
+          "maxItems": 120,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "label"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "to": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "label": { "type": ["string", "null"], "maxLength": 200 }
+            }
+          }
+        },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "participants", "messages", "source_paths"],
+      "properties": {
+        "type": { "type": "string", "const": "sequence" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "participants": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 200 }
+            }
+          }
+        },
+        "messages": {
+          "type": "array",
+          "maxItems": 120,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "label", "response"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "to": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "response": { "type": "boolean" }
+            }
+          }
+        },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    },
+    "class_diagram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "title", "classes", "relationships", "source_paths"],
+      "properties": {
+        "type": { "type": "string", "const": "class" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "classes": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label", "members"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "members": {
+                "type": "array",
+                "maxItems": 60,
+                "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+              }
+            }
+          }
+        },
+        "relationships": {
+          "type": "array",
+          "maxItems": 120,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to", "kind", "label"],
+            "properties": {
+              "from": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "to": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "kind": {
+                "type": "string",
+                "enum": ["association", "aggregation", "composition", "inheritance", "realization", "dependency"]
+              },
+              "label": { "type": ["string", "null"], "maxLength": 200 }
+            }
+          }
+        },
+        "source_paths": { "$ref": "#/$defs/source_paths" }
+      }
+    }
+  }
+}

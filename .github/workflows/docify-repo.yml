@@ -1,0 +1,60 @@
+# Reference workflow for running docify-repo as a GitHub pull-request publisher after a
+# merge to the base branch. Pin both the actions and the image by immutable digest before
+# production use, and confirm the repository allows Actions to create pull requests.
+name: docify-repo
+
+on:
+  push:
+    branches: [main]
+    # The generated-docs pull request merging back into main re-triggers this workflow, but
+    # that event only touches tool-owned paths and the planner treats it as a no-op. Ignoring
+    # those paths avoids starting the run at all.
+    paths-ignore:
+      - "docs/generated/**"
+      - ".docify/state.json"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize base-branch runs so a publisher never races another; a non-fast-forward push is
+# rejected rather than forced.
+concurrency:
+  group: docify-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  docify-repo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate documentation pull request
+        # Run as the checkout's own UID/GID so the bind-mounted workspace is owned by the
+        # container user (avoiding Git's dubious-ownership refusal), drop all Linux
+        # capabilities, and forbid privilege escalation. The tool needs none of them.
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            -e HOME=/tmp \
+            -e DOCIFY_BASE_SHA="${{ github.event.before }}" \
+            -e DOCIFY_HEAD_SHA="${{ github.sha }}" \
+            -e DOCIFY_LLM_BASE_URL \
+            -e DOCIFY_LLM_API_KEY \
+            -e DOCIFY_LLM_MODEL \
+            -e DOCIFY_GITHUB_TOKEN \
+            -e DOCIFY_GITHUB_REPOSITORY="${{ github.repository }}" \
+            -e DOCIFY_BASE_BRANCH="${{ github.event.repository.default_branch }}" \
+            ghcr.io/example/docify-repo:0.1.0 sync --publisher github-pr
+        env:
+          DOCIFY_LLM_BASE_URL: ${{ vars.DOCIFY_LLM_BASE_URL }}
+          DOCIFY_LLM_API_KEY: ${{ secrets.DOCIFY_LLM_API_KEY }}
+          DOCIFY_LLM_MODEL: ${{ vars.DOCIFY_LLM_MODEL }}
+          DOCIFY_GITHUB_TOKEN: ${{ github.token }}

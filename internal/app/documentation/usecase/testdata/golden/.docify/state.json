@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "generator_version": "0.1.0",
+  "planner_version": "v1",
+  "prompt_version": "v1",
+  "render_version": "v1",
+  "output_schema_version": "v1",
+  "config_hash": "sha256:2e72ffed21cd2c9bbb008594cea8b719d21dce4bee892cb80e93377019124221",
+  "config_hashes": {
+    "paths": "sha256:3ec7d51ee70952527cd57efca8c0fb6dbb2a490f97dd639ca403c501696396fd",
+    "source": "sha256:bc9a4adb1b2af85650050a9d910867de460359b3fcf47196b7a95fdb1b28d9df",
+    "components": "sha256:1e62181e6178fe9d47ddf1553d54cda1ce8cb5465df6dabf3119ce9bb2122120",
+    "context": "sha256:b308d2619b112af37b96fd3b37d17c8149bb101cf157ccc449d2befcf49311ae",
+    "generation": "sha256:847454b7e6ca5eee71fc2de8e8f382a2abe219b02a77ec34b58866767725d84e"
+  },
+  "generated_paths": [
+    "docs/generated/architecture.md",
+    "docs/generated/codebase_info.md",
+    "docs/generated/components.md",
+    "docs/generated/components/@root/index.md",
+    "docs/generated/components/services/api/index.md",
+    "docs/generated/data_models.md",
+    "docs/generated/dependencies.md",
+    "docs/generated/index.md",
+    "docs/generated/interfaces.md",
+    "docs/generated/review_notes.md",
+    "docs/generated/workflows.md"
+  ],
+  "generated_content_hashes": {
+    "docs/generated/architecture.md": "sha256:f4f689313a1fd5a5459bb8577804fce6a8670ab79fb4c948b99bd19a0d766ad7",
+    "docs/generated/codebase_info.md": "sha256:3afba002e2f69911b83f2469526c9808b5acda399e1725b074df14b241a5fcf1",
+    "docs/generated/components.md": "sha256:8a342ebe5511b29ae743185e2afd21483c9907fb013726ac910618d0d86d529d",
+    "docs/generated/components/@root/index.md": "sha256:6ea447aecca3ae65345f799f792ba0bab3686bd005d72ef18277577c5f0dab5b",
+    "docs/generated/components/services/api/index.md": "sha256:b2c18ef715284e724ecab3a9a723d32016e943aed18886df3a9a92e5c3e2aefb",
+    "docs/generated/data_models.md": "sha256:aed13ec8ff7a389c48969e83672e528869baf28d711aa173ccb821e9abb976b1",
+    "docs/generated/dependencies.md": "sha256:41adc15dbad655f6cf15428e1f7b0bcf73a988ee7b8a2cf64f03a5512c2601d3",
+    "docs/generated/index.md": "sha256:c144390592549b8d7cca2599ca594e743fb0cad34e6058ed44e7605c1ce71b87",
+    "docs/generated/interfaces.md": "sha256:8beede856e005f0969348d2d2c1db047423af3c61113636f4796d2678b261262",
+    "docs/generated/review_notes.md": "sha256:682f33243e8cd3e77e66084dc220362a0fcb25131c593eb6c545de188695665d",
+    "docs/generated/workflows.md": "sha256:bb5d0e8fe00371dc6eaddc04b9ff267afc0a203b770193965c313f6b864b6d69"
+  },
+  "files": {
+    "go.mod": {
+      "source_hash": "sha256:c16342024e4fae0ce09327a7b42ee9a2e4703b8ae0ec23f1698621fcf00b5402",
+      "role": "dependency_manifest",
+      "triggers_regeneration": true,
+      "component_key": "@root",
+      "root_component": true
+    },
+    "main.go": {
+      "source_hash": "sha256:55a60bb97151b2b4b680462447ce60ec34511b14fa10d77440c97b9777101566",
+      "role": "production_source",
+      "triggers_regeneration": true,
+      "component_key": "@root",
+      "root_component": true
+    },
+    "services/api/service.go": {
+      "source_hash": "sha256:0212f7086899ea73b03869dff7d86de3bb10616b96be5ebe921903b51a304e13",
+      "role": "production_source",
+      "triggers_regeneration": true,
+      "component_key": "services/api"
+    },
+    "services/api/service_test.go": {
+      "source_hash": "sha256:f3c61ca506361937d4fe8c5e231ff4d5edec3bdc8c29a1e476c4858fc2b52d7a",
+      "role": "test",
+      "triggers_regeneration": false,
+      "component_key": "services/api"
+    }
+  },
+  "components": {
+    "@root": {
+      "input_hash": "sha256:098e6f165bc411fb36c85f5cd104ad14993fa9b209d995a31cca29019904d417",
+      "document": "docs/generated/components/@root/index.md",
+      "root_component": true
+    },
+    "services/api": {
+      "input_hash": "sha256:a6e7aef479002072fd5fa95262e847e059f315825f13e3bc1949237b75f90496",
+      "document": "docs/generated/components/services/api/index.md"
+    }
+  }
+}
