@@ -107,11 +107,11 @@ func validateState(state sharedmodel.State) error {
 		return fmt.Errorf("generated_paths must be sorted")
 	}
 	for name, value := range map[string]string{
-		"config_hash": state.ConfigHash,
-		"config_hashes.paths": state.ConfigHashes.Paths,
-		"config_hashes.source": state.ConfigHashes.Source,
+		"config_hash":              state.ConfigHash,
+		"config_hashes.paths":      state.ConfigHashes.Paths,
+		"config_hashes.source":     state.ConfigHashes.Source,
 		"config_hashes.components": state.ConfigHashes.Components,
-		"config_hashes.context": state.ConfigHashes.Context,
+		"config_hashes.context":    state.ConfigHashes.Context,
 		"config_hashes.generation": state.ConfigHashes.Generation,
 	} {
 		if value != "" && !validSHA256(value) {

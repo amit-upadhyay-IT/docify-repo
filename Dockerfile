@@ -39,7 +39,7 @@ ARG CREATED=unknown
 
 LABEL org.opencontainers.image.title="docify-repo" \
       org.opencontainers.image.description="Deterministic repository documentation generator for CI" \
-      org.opencontainers.image.source="https://github.com/example/docify-repo" \
+      org.opencontainers.image.source="https://github.com/amit-upadhyay-IT/docify-repo" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${CREATED}"

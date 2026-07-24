@@ -52,7 +52,7 @@ jobs:
             -e DOCIFY_GITHUB_TOKEN \
             -e DOCIFY_GITHUB_REPOSITORY="${{ github.repository }}" \
             -e DOCIFY_BASE_BRANCH="${{ github.event.repository.default_branch }}" \
-            ghcr.io/example/docify-repo:0.1.0 sync --publisher github-pr
+            ghcr.io/amit-upadhyay-it/docify-repo:0.1.0 sync --publisher github-pr
         env:
           DOCIFY_LLM_BASE_URL: ${{ vars.DOCIFY_LLM_BASE_URL }}
           DOCIFY_LLM_API_KEY: ${{ secrets.DOCIFY_LLM_API_KEY }}
