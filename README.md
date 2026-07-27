@@ -64,32 +64,80 @@ Documentation rots. Code evolves rapidly, but docs are written once and quickly 
 
 ## How It Works
 
-```
-Base-branch push
-      │
-      ▼
- Repository scanner          ← Git-tracked files only; no build tools needed
-      │
-      ▼
- Component impact planner    ← Deterministic rules; the LLM never discovers components
-      │
-      ▼
- Bounded context builder     ← Redacts secrets; hard limits on bytes sent
-      │
-      ▼
- LLM provider (OpenAI-compatible)
-      │
-      ▼
- JSON schema validator + local Markdown renderer
-      │
-      ▼
- Generated docs committed to a PR branch
-      │
-      ▼
- GitHub Pull Request opened / updated
+```mermaid
+flowchart TD
+    A([🚀 Base-branch push]) --> B
+
+    B["🔍 Repository Scanner\n─────────────────────\nGit-tracked files only\nNo build tools needed"]
+    B --> C
+
+    C["📊 Component Impact Planner\n────────────────────────────\nDeterministic rules\nLLM never discovers components"]
+    C --> D
+
+    D["🔒 Bounded Context Builder\n───────────────────────────\nRedacts secrets\nHard limits on bytes sent"]
+    D --> E
+
+    E["🤖 LLM Provider\n────────────────\nOpenAI-compatible endpoint\nTemperature = 0 for stability"]
+    E --> F
+
+    F["✅ JSON Schema Validator\n+ Local Markdown Renderer\n─────────────────────────\nOutput is validated before writing"]
+    F --> G
+
+    G["📝 Generated Docs Committed\nto a PR Branch"]
+    G --> H
+
+    H([🔀 GitHub Pull Request\nOpened / Updated])
+
+    style A fill:#4f46e5,color:#fff,stroke:#3730a3
+    style H fill:#059669,color:#fff,stroke:#047857
+    style B fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style C fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style D fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style E fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style F fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style G fill:#1e293b,color:#e2e8f0,stroke:#475569
 ```
 
 The pipeline is incremental: only source files that changed between the base and head commits are considered. Unchanged components are not regenerated, keeping LLM costs proportional to the actual diff.
+
+### Incremental vs. Full Run
+
+```mermaid
+flowchart TD
+    START([CI Run triggered]) --> CHK{State file exists?
+.docify/state.json}
+
+    CHK -- No --> FULL[Full Bootstrap
+All components regenerated]
+    CHK -- "--full flag set" --> FULL
+
+    CHK -- Yes --> DIFF[Diff base..head commits
+Identify changed source files]
+
+    DIFF --> MAP[Map changed files
+to affected components]
+
+    MAP --> SKIP[Skip unchanged components
+Copy existing docs as-is]
+    MAP --> REGEN[Regenerate only
+affected components]
+
+    SKIP --> MERGE[Merge into final docs]
+    REGEN --> MERGE
+    FULL --> MERGE
+
+    MERGE --> PUBLISH([Publish to PR branch])
+
+    style START fill:#4f46e5,color:#fff,stroke:#3730a3
+    style PUBLISH fill:#059669,color:#fff,stroke:#047857
+    style FULL fill:#b45309,color:#fff,stroke:#92400e
+    style REGEN fill:#0f766e,color:#fff,stroke:#0d9488
+    style SKIP fill:#1e293b,color:#94a3b8,stroke:#475569
+    style CHK fill:#1e293b,color:#e2e8f0,stroke:#6366f1
+    style DIFF fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style MAP fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style MERGE fill:#1e293b,color:#e2e8f0,stroke:#475569
+```
 
 ---
 
@@ -346,6 +394,57 @@ docify-repo <command> [flags]
 - **Credentials are isolated.** The GitHub token never reaches the LLM request builder. The LLM API key never reaches the GitHub publisher.
 - **Writes are bounded.** The tool only writes to `docs/generated/**` and `.docify/state.json`. It refuses to overwrite files it does not own.
 - **Non-root container.** The image declares a fixed non-root user. The reference workflow additionally drops all Linux capabilities.
+
+### Credential Isolation Flow
+
+```mermaid
+flowchart LR
+    subgraph REPO ["📁 Your Repository"]
+        SRC[Source Code]
+    end
+
+    subgraph DOCIFY ["⚙️ docify-repo pipeline"]
+        direction TB
+        CTX["Context Builder\n(redacts secrets)"]
+        LLM_REQ["LLM Request Builder"]
+        PR_PUB["GitHub PR Publisher"]
+    end
+
+    subgraph SECRETS ["🔑 Credentials (env vars)"]
+        direction TB
+        LLMKEY["DOCIFY_LLM_API_KEY"]
+        GHTOKEN["DOCIFY_GITHUB_TOKEN"]
+    end
+
+    subgraph EXTERNAL ["🌐 External Services"]
+        LLM_EP["LLM Endpoint\n(e.g. Gemini API)"]
+        GH["GitHub API"]
+    end
+
+    SRC --> CTX --> LLM_REQ
+    LLMKEY --> LLM_REQ
+    LLM_REQ -- "source code + prompt" --> LLM_EP
+    LLM_EP -- "generated docs (prose only)" --> PR_PUB
+    GHTOKEN --> PR_PUB
+    PR_PUB -- "commits + PR" --> GH
+
+    LLMKEY -. "never reaches" .- GH
+    GHTOKEN -. "never reaches" .- LLM_EP
+
+    style REPO fill:#1e3a5f,color:#bfdbfe,stroke:#3b82f6
+    style DOCIFY fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style SECRETS fill:#3b1f1f,color:#fca5a5,stroke:#ef4444
+    style EXTERNAL fill:#14532d,color:#bbf7d0,stroke:#22c55e
+    style CTX fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style LLM_REQ fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style PR_PUB fill:#1e293b,color:#e2e8f0,stroke:#475569
+    style LLMKEY fill:#7f1d1d,color:#fca5a5,stroke:#dc2626
+    style GHTOKEN fill:#7f1d1d,color:#fca5a5,stroke:#dc2626
+    style LLM_EP fill:#064e3b,color:#a7f3d0,stroke:#10b981
+    style GH fill:#064e3b,color:#a7f3d0,stroke:#10b981
+```
+
+> The dashed lines show what **cannot** happen — each credential is scoped to exactly one external destination.
 
 See [`docs/security.md`](docs/security.md) for the full threat model, credential flow, and operator checklist.
 
