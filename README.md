@@ -66,27 +66,14 @@ Documentation rots. Code evolves rapidly, but docs are written once and quickly 
 
 ```mermaid
 flowchart TD
-    A([🚀 Base-branch push]) --> B
-
-    B["🔍 Repository Scanner\n─────────────────────\nGit-tracked files only\nNo build tools needed"]
-    B --> C
-
-    C["📊 Component Impact Planner\n────────────────────────────\nDeterministic rules\nLLM never discovers components"]
-    C --> D
-
-    D["🔒 Bounded Context Builder\n───────────────────────────\nRedacts secrets\nHard limits on bytes sent"]
-    D --> E
-
-    E["🤖 LLM Provider\n────────────────\nOpenAI-compatible endpoint\nTemperature = 0 for stability"]
-    E --> F
-
-    F["✅ JSON Schema Validator\n+ Local Markdown Renderer\n─────────────────────────\nOutput is validated before writing"]
-    F --> G
-
-    G["📝 Generated Docs Committed\nto a PR Branch"]
-    G --> H
-
-    H([🔀 GitHub Pull Request\nOpened / Updated])
+    A(["🚀 Base-branch push"]) --> B
+    B["🔍 Repository Scanner"] --> C
+    C["📊 Component Impact Planner"] --> D
+    D["🔒 Bounded Context Builder"] --> E
+    E["🤖 LLM Provider"] --> F
+    F["✅ JSON Schema Validator + Markdown Renderer"] --> G
+    G["📝 Commit Generated Docs to PR Branch"] --> H
+    H(["🔀 GitHub Pull Request opened / updated"])
 
     style A fill:#4f46e5,color:#fff,stroke:#3730a3
     style H fill:#059669,color:#fff,stroke:#047857
@@ -104,29 +91,21 @@ The pipeline is incremental: only source files that changed between the base and
 
 ```mermaid
 flowchart TD
-    START([CI Run triggered]) --> CHK{State file exists?
-.docify/state.json}
+    START(["CI Run triggered"]) --> CHK
+    CHK{"State file exists?"}
 
-    CHK -- No --> FULL[Full Bootstrap
-All components regenerated]
-    CHK -- "--full flag set" --> FULL
+    CHK -- "No / --full flag" --> FULL["Full Bootstrap"]
+    CHK -- "Yes" --> DIFF["Diff base..head commits"]
 
-    CHK -- Yes --> DIFF[Diff base..head commits
-Identify changed source files]
+    DIFF --> MAP["Map changed files to components"]
+    MAP --> SKIP["Skip unchanged components"]
+    MAP --> REGEN["Regenerate affected components"]
 
-    DIFF --> MAP[Map changed files
-to affected components]
-
-    MAP --> SKIP[Skip unchanged components
-Copy existing docs as-is]
-    MAP --> REGEN[Regenerate only
-affected components]
-
-    SKIP --> MERGE[Merge into final docs]
+    SKIP --> MERGE["Merge into final docs"]
     REGEN --> MERGE
     FULL --> MERGE
 
-    MERGE --> PUBLISH([Publish to PR branch])
+    MERGE --> PUBLISH(["Publish to PR branch"])
 
     style START fill:#4f46e5,color:#fff,stroke:#3730a3
     style PUBLISH fill:#059669,color:#fff,stroke:#047857
@@ -400,31 +379,31 @@ docify-repo <command> [flags]
 ```mermaid
 flowchart LR
     subgraph REPO ["📁 Your Repository"]
-        SRC[Source Code]
+        SRC["Source Code"]
     end
 
-    subgraph DOCIFY ["⚙️ docify-repo pipeline"]
+    subgraph DOCIFY ["⚙️ docify-repo Pipeline"]
         direction TB
-        CTX["Context Builder\n(redacts secrets)"]
+        CTX["Context Builder"]
         LLM_REQ["LLM Request Builder"]
         PR_PUB["GitHub PR Publisher"]
     end
 
-    subgraph SECRETS ["🔑 Credentials (env vars)"]
+    subgraph SECRETS ["🔑 Credentials"]
         direction TB
         LLMKEY["DOCIFY_LLM_API_KEY"]
         GHTOKEN["DOCIFY_GITHUB_TOKEN"]
     end
 
     subgraph EXTERNAL ["🌐 External Services"]
-        LLM_EP["LLM Endpoint\n(e.g. Gemini API)"]
+        LLM_EP["LLM Endpoint"]
         GH["GitHub API"]
     end
 
     SRC --> CTX --> LLM_REQ
     LLMKEY --> LLM_REQ
-    LLM_REQ -- "source code + prompt" --> LLM_EP
-    LLM_EP -- "generated docs (prose only)" --> PR_PUB
+    LLM_REQ -- "source + prompt" --> LLM_EP
+    LLM_EP -- "generated docs" --> PR_PUB
     GHTOKEN --> PR_PUB
     PR_PUB -- "commits + PR" --> GH
 
