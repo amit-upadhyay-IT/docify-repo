@@ -16,6 +16,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  id-token: write # required by google-github-actions/auth
 
 # Serialize base-branch runs so a publisher never races another; a non-fast-forward push is
 # rejected rather than forced.
@@ -31,6 +32,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Authenticate to GCP and generate a short-lived OAuth2 access token.
+      # The token is valid for 1 hour — sufficient for a single docify run.
+      # It is passed as a bearer credential to the Vertex AI OpenAI-compatible endpoint.
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+          token_format: 'access_token'
 
       - name: Generate documentation pull request
         # Run as the checkout's own UID/GID so the bind-mounted workspace is owned by the
@@ -55,6 +65,6 @@ jobs:
             ghcr.io/amit-upadhyay-it/docify-repo:0.1.0 sync --publisher github-pr
         env:
           DOCIFY_LLM_BASE_URL: ${{ vars.DOCIFY_LLM_BASE_URL }}
-          DOCIFY_LLM_API_KEY: ${{ secrets.DOCIFY_LLM_API_KEY }}
+          DOCIFY_LLM_API_KEY: ${{ steps.auth.outputs.access_token }}
           DOCIFY_LLM_MODEL: ${{ vars.DOCIFY_LLM_MODEL }}
           DOCIFY_GITHUB_TOKEN: ${{ github.token }}

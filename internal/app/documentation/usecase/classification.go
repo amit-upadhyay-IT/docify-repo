@@ -298,10 +298,11 @@ func isSecretPath(repositoryPath string) bool {
 
 func containsHighConfidenceSecret(content []byte) bool {
 	upper := bytes.ToUpper(content)
-	if bytes.Contains(upper, []byte("-----BEGIN PRIVATE KEY-----")) ||
-		bytes.Contains(upper, []byte("-----BEGIN RSA PRIVATE KEY-----")) ||
-		bytes.Contains(upper, []byte("-----BEGIN EC PRIVATE KEY-----")) ||
-		bytes.Contains(upper, []byte("-----BEGIN OPENSSH PRIVATE KEY-----")) {
+	// Split the strings to prevent the scanner from triggering on its own source code
+	if bytes.Contains(upper, []byte("-----BEGIN "+"PRIVATE KEY-----")) ||
+		bytes.Contains(upper, []byte("-----BEGIN "+"RSA PRIVATE KEY-----")) ||
+		bytes.Contains(upper, []byte("-----BEGIN "+"EC PRIVATE KEY-----")) ||
+		bytes.Contains(upper, []byte("-----BEGIN "+"OPENSSH PRIVATE KEY-----")) {
 		return true
 	}
 	for _, pattern := range highConfidenceSecretPatterns {
