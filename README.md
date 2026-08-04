@@ -377,43 +377,27 @@ docify-repo <command> [flags]
 ### Credential Isolation Flow
 
 ```mermaid
-flowchart LR
-    subgraph REPO ["📁 Your Repository"]
-        SRC["Source Code"]
-    end
-
-    subgraph DOCIFY ["⚙️ docify-repo Pipeline"]
-        direction TB
-        CTX["Context Builder"]
-        LLM_REQ["LLM Request Builder"]
-        PR_PUB["GitHub PR Publisher"]
-    end
-
-    subgraph SECRETS ["🔑 Credentials"]
-        direction TB
-        LLMKEY["DOCIFY_LLM_API_KEY"]
-        GHTOKEN["DOCIFY_GITHUB_TOKEN"]
-    end
-
-    subgraph EXTERNAL ["🌐 External Services"]
-        LLM_EP["LLM Endpoint"]
-        GH["GitHub API"]
-    end
+flowchart TD
+    SRC["📁 Source Code"]
+    CTX["Context Builder\n(redacts secrets)"]
+    LLM_REQ["LLM Request Builder"]
+    PR_PUB["GitHub PR Publisher"]
+    LLMKEY["🔑 DOCIFY_LLM_API_KEY"]
+    GHTOKEN["🔑 DOCIFY_GITHUB_TOKEN"]
+    LLM_EP["🌐 LLM Endpoint"]
+    GH["🌐 GitHub API"]
 
     SRC --> CTX --> LLM_REQ
     LLMKEY --> LLM_REQ
-    LLM_REQ -- "source + prompt" --> LLM_EP
-    LLM_EP -- "generated docs" --> PR_PUB
+    LLM_REQ -->|"source + prompt"| LLM_EP
+    LLM_EP -->|"generated docs"| PR_PUB
     GHTOKEN --> PR_PUB
-    PR_PUB -- "commits + PR" --> GH
+    PR_PUB -->|"commits + PR"| GH
 
     LLMKEY -. "never reaches" .- GH
     GHTOKEN -. "never reaches" .- LLM_EP
 
-    style REPO fill:#1e3a5f,color:#bfdbfe,stroke:#3b82f6
-    style DOCIFY fill:#1e293b,color:#e2e8f0,stroke:#475569
-    style SECRETS fill:#3b1f1f,color:#fca5a5,stroke:#ef4444
-    style EXTERNAL fill:#14532d,color:#bbf7d0,stroke:#22c55e
+    style SRC fill:#1e3a5f,color:#bfdbfe,stroke:#3b82f6
     style CTX fill:#1e293b,color:#e2e8f0,stroke:#475569
     style LLM_REQ fill:#1e293b,color:#e2e8f0,stroke:#475569
     style PR_PUB fill:#1e293b,color:#e2e8f0,stroke:#475569
