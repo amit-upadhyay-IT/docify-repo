@@ -1,0 +1,5 @@
+Return only architecture items for target.component_key. Return at most 2 items.
+Each item has a title of at most 100 bytes, a description of at most 400 bytes,
+and one or two source paths of at most 512 bytes each. Describe structural
+responsibilities and boundaries only; do not return interfaces, models,
+workflows, dependencies, review gaps, or diagrams.

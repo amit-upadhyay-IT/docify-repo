@@ -30,3 +30,6 @@ go.work.sum
 # build directory (if any)
 bin/
 build/
+
+# Opt-in live fragment qualification artifacts
+fragment-qualification/

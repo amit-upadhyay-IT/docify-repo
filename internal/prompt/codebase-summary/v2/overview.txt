@@ -1,0 +1,4 @@
+Return only one coherent title and purpose for target.component_key from the
+validated overview candidates and section summary supplied by the application.
+The title is at most 100 bytes and purpose at most 400 bytes. Do not return source
+paths, section items, review gaps, diagrams, or any other fields.

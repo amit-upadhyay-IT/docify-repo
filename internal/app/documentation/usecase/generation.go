@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,20 +16,128 @@ import (
 // componentGenerationStats records safe, non-secret counts for one component's
 // generation. It carries no source or model prose.
 type componentGenerationStats struct {
-	Normal    int
-	Batch     int
-	Synthesis int
-	Repair    int
-	Usage     sharedmodel.TokenUsage
+	Normal            int
+	Batch             int
+	Synthesis         int
+	Fragment          int
+	Overview          int
+	Diagram           int
+	Repair            int
+	Fallback          int
+	Split             int
+	SplitCalls        int
+	Saturated         int
+	OverviewFallback  int
+	DiagramFallback   int
+	TransportAttempts int
+	Usage             sharedmodel.TokenUsage
+}
+
+func (s *componentGenerationStats) recordCall(kind sharedmodel.RequestKind) {
+	switch kind {
+	case sharedmodel.RequestComponent:
+		s.Normal++
+	case sharedmodel.RequestBatch:
+		s.Batch++
+	case sharedmodel.RequestSynthesis:
+		s.Synthesis++
+	case sharedmodel.RequestFragment:
+		s.Fragment++
+	case sharedmodel.RequestOverview:
+		s.Overview++
+	case sharedmodel.RequestDiagram:
+		s.Diagram++
+	case sharedmodel.RequestRepair:
+		s.Repair++
+	}
+}
+
+func (s *componentGenerationStats) merge(other componentGenerationStats) {
+	s.Normal += other.Normal
+	s.Batch += other.Batch
+	s.Synthesis += other.Synthesis
+	s.Fragment += other.Fragment
+	s.Overview += other.Overview
+	s.Diagram += other.Diagram
+	s.Repair += other.Repair
+	s.Fallback += other.Fallback
+	s.Split += other.Split
+	s.SplitCalls += other.SplitCalls
+	s.Saturated += other.Saturated
+	s.OverviewFallback += other.OverviewFallback
+	s.DiagramFallback += other.DiagramFallback
+	s.TransportAttempts += other.TransportAttempts
+	if other.Usage.Present {
+		s.Usage.Present = true
+		s.Usage.PromptTokens += other.Usage.PromptTokens
+		s.Usage.CompletionTokens += other.Usage.CompletionTokens
+		s.Usage.TotalTokens += other.Usage.TotalTokens
+	}
 }
 
 func (s *componentGenerationStats) record(response sharedmodel.GenerationResponse) {
+	s.TransportAttempts += response.TransportAttempts
 	if response.Usage.Present {
 		s.Usage.Present = true
 		s.Usage.PromptTokens += response.Usage.PromptTokens
 		s.Usage.CompletionTokens += response.Usage.CompletionTokens
 		s.Usage.TotalTokens += response.Usage.TotalTokens
 	}
+}
+
+// llmCallLimiter applies one orchestration-wide concurrency budget immediately around
+// every Generator.Generate invocation. Nested component and batch workers share this
+// instance and never hold a permit while spawning or waiting for other work.
+type llmCallLimiter struct {
+	generator Generator
+	permits   chan struct{}
+
+	mu        sync.Mutex
+	completed componentGenerationStats
+}
+
+func newLLMCallLimiter(generator Generator, concurrency int) *llmCallLimiter {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return &llmCallLimiter{generator: generator, permits: make(chan struct{}, concurrency)}
+}
+
+func (l *llmCallLimiter) Generate(ctx context.Context, request sharedmodel.GenerationRequest) (sharedmodel.GenerationResponse, error) {
+	select {
+	case l.permits <- struct{}{}:
+	case <-ctx.Done():
+		return sharedmodel.GenerationResponse{}, ctx.Err()
+	}
+	response, err := l.generator.Generate(ctx, request)
+	<-l.permits
+	if err != nil && response.TransportAttempts == 0 {
+		response.TransportAttempts = errorTransportAttempts(err)
+	}
+
+	l.mu.Lock()
+	l.completed.recordCall(request.Kind)
+	l.completed.record(response)
+	l.mu.Unlock()
+	return response, err
+}
+
+func errorTransportAttempts(err error) int {
+	var completionErr *sharedmodel.CompletionError
+	if errors.As(err, &completionErr) {
+		return completionErr.TransportAttempts
+	}
+	var transportErr *sharedmodel.TransportError
+	if errors.As(err, &transportErr) {
+		return transportErr.TransportAttempts
+	}
+	return 0
+}
+
+func (l *llmCallLimiter) snapshot() componentGenerationStats {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.completed
 }
 
 // generateComponentDossier produces one validated dossier for a component. A normal
@@ -61,11 +170,11 @@ func generateComponentDossier(
 	if requestPlan.normal {
 		planned := requestPlan.requests[0]
 		allowed := allowedEvidencePaths(planned.source, supporting, manifests)
+		stats.Normal++
 		validation, err := generateWithRepair(ctx, generator, bundle, planned.request, allowed, catalog, &stats)
 		if err != nil {
 			return sharedmodel.ComponentDossier{}, stats, err
 		}
-		stats.Normal++
 		return validation.dossier, stats, nil
 	}
 
@@ -88,6 +197,7 @@ func generateComponentDossier(
 	stats.Batch = len(requestPlan.requests)
 	for index := range batchStats {
 		stats.Repair += batchStats[index].Repair
+		stats.TransportAttempts += batchStats[index].TransportAttempts
 		if batchStats[index].Usage.Present {
 			stats.Usage.Present = true
 			stats.Usage.PromptTokens += batchStats[index].Usage.PromptTokens
@@ -106,11 +216,47 @@ func generateComponentDossier(
 		return sharedmodel.ComponentDossier{}, stats, err
 	}
 	validation, err := generateWithRepair(ctx, generator, bundle, synthesisRequest, unionEvidence, catalog, &stats)
+	stats.Synthesis++
 	if err != nil {
 		return sharedmodel.ComponentDossier{}, stats, err
 	}
-	stats.Synthesis++
 	return validation.dossier, stats, nil
+}
+
+// generateAutoComponentDossier runs the one-request dossier fast path under the
+// component budget and switches to fragment mode only for typed truncation.
+func generateAutoComponentDossier(
+	ctx context.Context,
+	generator Generator,
+	bundle prompt.Bundle,
+	fragmentBundle prompt.FragmentBundle,
+	settings sharedmodel.GenerationSettings,
+	component sharedmodel.Component,
+	supporting, manifests []sharedmodel.SourceFile,
+	catalog []string,
+	changes []sharedmodel.Change,
+	kind string,
+	input documentationmodel.PlanInput,
+	concurrency int,
+) (sharedmodel.ComponentDossier, componentGenerationStats, error) {
+	budgeted := &componentCallBudget{generator: generator, componentKey: component.Key, limit: input.GenerationPolicy.FragmentCallLimit}
+	dossier, stats, err := generateComponentDossier(ctx, budgeted, bundle, settings, component, supporting, manifests, catalog, changes, kind, input, concurrency)
+	if err == nil || !isTruncationError(err) {
+		return dossier, stats, err
+	}
+	stats.Fallback++
+	fragmented, fragmentStats, fragmentErr := generateComponentFragmentsWithBudget(ctx, budgeted, fragmentBundle, settings, component,
+		supporting, manifests, catalog, changes, kind, input, concurrency)
+	stats.merge(fragmentStats)
+	if fragmentErr != nil {
+		return sharedmodel.ComponentDossier{}, stats, fragmentErr
+	}
+	return fragmented, stats, nil
+}
+
+func isTruncationError(err error) bool {
+	var completionErr *sharedmodel.CompletionError
+	return errors.As(err, &completionErr) && completionErr.Category == sharedmodel.CompletionFailureTruncated
 }
 
 // generateWithRepair sends one request, validates the response, and on a repair-eligible
@@ -124,10 +270,10 @@ func generateWithRepair(
 	stats *componentGenerationStats,
 ) (dossierValidation, error) {
 	response, err := generator.Generate(ctx, request)
+	stats.record(response)
 	if err != nil {
 		return dossierValidation{}, err
 	}
-	stats.record(response)
 	validation := validateDossier(response.Body, allowedEvidence, catalog)
 	if validation.valid() {
 		return validation, nil
@@ -139,10 +285,10 @@ func generateWithRepair(
 	}
 	stats.Repair++
 	repairResponse, err := generator.Generate(ctx, repairRequest)
+	stats.record(repairResponse)
 	if err != nil {
 		return dossierValidation{}, err
 	}
-	stats.record(repairResponse)
 	repaired := validateDossier(repairResponse.Body, allowedEvidence, catalog)
 	if repaired.valid() {
 		return repaired, nil
@@ -233,6 +379,12 @@ func issueCodes(issues []sharedmodel.ValidationIssue) []string {
 type dossierValidationError struct {
 	componentKey string
 	kind         sharedmodel.RequestKind
+	fragmentKind sharedmodel.FragmentKind
+	batchIndex   int
+	batchCount   int
+	chunkIndex   int
+	chunkCount   int
+	splitPath    string
 	codes        []string
 }
 

@@ -110,9 +110,10 @@ func TestPlanProducesCredentialFreeJSONScan(t *testing.T) {
 			Strategy: "inferred", MaxContextBytes: 120_000, MaxBatchBytes: 80_000,
 			MaxSupportingBytes: 20_000, MaxManifestBytes: 20_000, MaxDiffBytes: 40_000, MaxRequestBytes: 200_000,
 		},
-		Documentation: config.DocumentationConfig{Profile: "codebase-summary", Audience: "mixed", Mermaid: true},
+		Documentation: config.DocumentationConfig{Profile: "codebase-summary", Audience: "mixed", Mermaid: true, GenerationStrategy: "dossier"},
 		LLM: config.LLMConfig{
-			Provider: "openai-compatible", APIMode: "chat_completions", MaxOutputTokens: 8192, StructuredOutputMode: "auto",
+			Provider: "openai-compatible", APIMode: "chat_completions", MaxOutputTokens: 8192, MaxResponseBytes: 65_536,
+			StructuredOutputMode: "auto", FragmentCallLimit: 80,
 		},
 		Publishing: config.PublishingConfig{Provider: "worktree"},
 	}
@@ -136,6 +137,20 @@ func TestPlanProducesCredentialFreeJSONScan(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), directory) {
 		t.Error("JSON output contains machine-specific repository path")
+	}
+}
+
+func TestEndpointIdentityHashNormalizesWithoutExposingEndpoint(t *testing.T) {
+	first := endpointIdentityHash(" HTTPS://Example.COM/v1/ ")
+	second := endpointIdentityHash("https://example.com/v1")
+	if first != second {
+		t.Fatalf("normalized endpoint hashes differ: %q != %q", first, second)
+	}
+	if first == endpointIdentityHash("https://example.com/v2") {
+		t.Fatal("different endpoint paths should have different hashes")
+	}
+	if strings.Contains(first, "example.com") {
+		t.Fatalf("endpoint hash exposes endpoint: %q", first)
 	}
 }
 

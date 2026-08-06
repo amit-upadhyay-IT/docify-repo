@@ -89,21 +89,27 @@ func TestValidatePublishInputRequiresIdentityAndCredential(t *testing.T) {
 func TestRenderPullRequestBodyIsSafeAndDeterministic(t *testing.T) {
 	summary := documentationmodel.ResultSummary{
 		Plan: sharedmodel.GenerationPlan{
-			Mode:        "incremental",
-			StateStatus: "compatible",
+			Mode: "incremental", StateStatus: "compatible", GenerationStrategy: "auto",
+			Calls: sharedmodel.CallEstimate{TypicalLogical: 1, MaximumLogical: 80, MaximumHTTPAttempts: 480},
 			AffectedComponents: []sharedmodel.AffectedComponent{
 				{Key: "services/api", Action: sharedmodel.ComponentRegenerate},
+				{Key: "service`\n@team", Action: sharedmodel.ComponentCreate},
 			},
 		},
 		Generation: &documentationmodel.GenerationOutcome{
-			Diff: sharedmodel.OutputDiff{Added: []string{"a"}, Changed: []string{"b", "c"}},
+			Diff:          sharedmodel.OutputDiff{Added: []string{"a"}, Changed: []string{"b", "c"}},
+			FragmentCalls: 7, RepairCalls: 1, FragmentFallbacks: 1, FragmentSourceSplits: 2,
 		},
 	}
 	body := renderPullRequestBody("0123456789abcdef", "fedcba9876543210", summary)
 	if body != renderPullRequestBody("0123456789abcdef", "fedcba9876543210", summary) {
 		t.Fatal("pull-request body is not deterministic")
 	}
-	for _, want := range []string{"012345678", "incremental", "services/api (regenerate)", "Added: 1", "Changed: 2"} {
+	for _, want := range []string{
+		"012345678", "incremental", "Generation strategy: `auto`", "1 typical / 80 maximum logical / 480 maximum HTTP attempts",
+		"services/api (regenerate)", "Fragment calls: 7", "Repairs: 1", "Fragment fallbacks: 1", "Source splits: 2",
+		"Added: 1", "Changed: 2",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q\n%s", want, body)
 		}
@@ -111,5 +117,20 @@ func TestRenderPullRequestBodyIsSafeAndDeterministic(t *testing.T) {
 	// The short SHA must not include the full SHA (bounded to the hash length).
 	if strings.Contains(body, "0123456789abcdef") {
 		t.Error("body leaked the full SHA instead of the short form")
+	}
+	if strings.Contains(body, "\n@team") || !strings.Contains(body, `\u{A}`) {
+		t.Errorf("body did not neutralize component Markdown controls:\n%s", body)
+	}
+}
+
+func TestPublishFailureReportRetainsCompletedValidation(t *testing.T) {
+	summary := documentationmodel.ResultSummary{
+		Command: "sync", Status: "publish_failed",
+		Generation: &documentationmodel.GenerationOutcome{},
+		Failure:    &documentationmodel.GenerationFailure{Category: "publish"},
+	}
+	report := buildRunReport(summary, nil)
+	if !report.Validation.OutputValidated {
+		t.Fatalf("validation = %+v, want completed generation preserved", report.Validation)
 	}
 }

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v2/review-gaps-fragment",
+  "title": "component_fragment_review_gaps",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["complete", "items"],
+  "properties": {
+    "complete": { "type": "boolean" },
+    "omitted_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "items": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "description", "recommendation", "source_paths"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["uncertainty", "missing_context", "inconsistency", "unsupported_construct", "excluded_input", "other"]
+          },
+          "description": { "type": "string", "minLength": 1, "maxLength": 400 },
+          "recommendation": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "source_paths": {
+            "type": "array",
+            "maxItems": 2,
+            "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        }
+      }
+    }
+  }
+}

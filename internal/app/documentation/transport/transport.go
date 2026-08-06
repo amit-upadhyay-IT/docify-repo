@@ -2,9 +2,11 @@ package transport
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -50,6 +52,20 @@ func llmTimeout(value string) time.Duration {
 		return 0
 	}
 	return timeout
+}
+
+func endpointIdentityHash(value string) string {
+	normalized := strings.TrimRight(strings.TrimSpace(value), "/")
+	if parsed, err := url.Parse(normalized); err == nil {
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		parsed.Path = strings.TrimRight(parsed.Path, "/")
+		parsed.RawPath = ""
+		parsed.Fragment = ""
+		normalized = parsed.String()
+	}
+	digest := sha256.Sum256([]byte(normalized))
+	return fmt.Sprintf("sha256:%x", digest)
 }
 
 // HandleAskpass answers a Git credential prompt when this process was re-invoked as the
@@ -106,7 +122,7 @@ func (t *Transport) command() *cobra.Command {
 		TokenSource:     openairepository.NewEnvTokenSource(openairepository.CredentialEnvVar),
 		Timeout:         llmTimeout(t.config.LLM.Timeout),
 		Retries:         t.config.LLM.Retries,
-		MaxContentBytes: int64(t.config.Components.MaxRequestBytes),
+		MaxContentBytes: t.config.LLM.MaxResponseBytes,
 	})
 	output := filesystemrepository.NewOutputRepository()
 	pullRequests := githubrepository.New(githubrepository.Options{
@@ -201,12 +217,18 @@ func (t *Transport) generationPolicy() documentationmodel.GenerationPolicy {
 		Profile:              t.config.Documentation.Profile,
 		Audience:             t.config.Documentation.Audience,
 		Mermaid:              t.config.Documentation.Mermaid,
+		GenerationStrategy:   t.config.Documentation.GenerationStrategy,
 		Provider:             t.config.LLM.Provider,
 		APIMode:              t.config.LLM.APIMode,
 		Model:                t.config.LLM.Model,
 		Temperature:          t.config.LLM.Temperature,
 		MaxOutputTokens:      t.config.LLM.MaxOutputTokens,
+		MaxResponseBytes:     t.config.LLM.MaxResponseBytes,
+		EndpointHash:         endpointIdentityHash(t.config.LLM.BaseURL),
 		StructuredOutputMode: t.config.LLM.StructuredOutputMode,
+		TransportRetries:     t.config.LLM.Retries,
+		FragmentCallLimit:    t.config.LLM.FragmentCallLimit,
+		FragmentSplitDepth:   t.config.LLM.FragmentSplitDepth,
 	}
 }
 

@@ -26,6 +26,23 @@ func decodeComponentPayload(t *testing.T, request sharedmodel.GenerationRequest)
 	return payload
 }
 
+func decodeFragmentPayload(t *testing.T, request sharedmodel.GenerationRequest) fragmentPayload {
+	t.Helper()
+	if len(request.Messages) != 2 || request.Messages[0].Role != sharedmodel.RoleSystem || request.Messages[1].Role != sharedmodel.RoleUser {
+		t.Fatalf("messages = %+v, want system then user", request.Messages)
+	}
+	user := request.Messages[1].Content
+	start := strings.IndexByte(user, '{')
+	if start < 0 {
+		t.Fatalf("user message has no JSON payload: %q", user)
+	}
+	var payload fragmentPayload
+	if err := json.Unmarshal([]byte(user[start:]), &payload); err != nil {
+		t.Fatalf("decode fragment payload: %v", err)
+	}
+	return payload
+}
+
 func TestBuildComponentRequestIncludesOnlyAllowListedContent(t *testing.T) {
 	component := sharedmodel.Component{
 		Key: "services/api", Document: "components/services-api/index.md",
@@ -108,13 +125,178 @@ func TestBuildRepairRequestCannotExpandScopeOrRepairARepair(t *testing.T) {
 	}
 }
 
-func TestRequestContentBytesCountsMessagesAndSchema(t *testing.T) {
+func TestBuildFragmentRequestPinsContractAndScope(t *testing.T) {
+	settings := generationSettings(testPlanInput().GenerationPolicy)
+	settings.MaxOutputTokens = fragmentMinimumOutputTokens
+	component := sharedmodel.Component{
+		Key: "services/api",
+		TriggeringFiles: []sharedmodel.SourceFile{
+			planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "package api"),
+		},
+	}
+	request, err := buildFragmentRequest(
+		prompt.CodebaseSummaryV2(), settings, component,
+		sharedmodel.FragmentInterfaces, component.TriggeringFiles, nil, nil, []string{"services/api"}, nil, "full",
+		2, 3, 1, 2, 65_536, 500_000,
+	)
+	if err != nil {
+		t.Fatalf("buildFragmentRequest() error = %v", err)
+	}
+	if request.Kind != sharedmodel.RequestFragment || request.FragmentKind != sharedmodel.FragmentInterfaces ||
+		request.SourceBatchIndex != 2 || request.SourceBatchCount != 3 || request.SourceChunkIndex != 1 || request.SourceChunkCount != 2 {
+		t.Fatalf("fragment request metadata = %+v", request)
+	}
+	payload := decodeFragmentPayload(t, request)
+	if payload.Target.FragmentKind != sharedmodel.FragmentInterfaces || payload.Target.SourceBatchIndex != 2 || payload.Target.SourceChunkCount != 2 {
+		t.Fatalf("fragment payload target = %+v", payload.Target)
+	}
+	if !equalStrings(payload.Repository.AllowedEvidencePaths, []string{"services/api/a.go"}) {
+		t.Fatalf("allowed evidence = %v", payload.Repository.AllowedEvidencePaths)
+	}
+	activeSchema, _ := prompt.CodebaseSummaryV2().FragmentSchema(sharedmodel.FragmentInterfaces)
+	if string(request.Schema) != string(activeSchema) || request.SchemaName != "component_fragment_interfaces" {
+		t.Fatal("fragment request does not carry the exact active schema")
+	}
+	if payload.Limits.MaximumItems != fragmentMaxInterfaceItems || payload.Limits.MaximumLongTextBytes != fragmentMaxLongText {
+		t.Fatalf("fragment limits = %+v", payload.Limits)
+	}
+}
+
+func TestBuildFragmentRepairCannotExpandScopeOrRepairAgain(t *testing.T) {
+	settings := generationSettings(testPlanInput().GenerationPolicy)
+	settings.MaxOutputTokens = fragmentMinimumOutputTokens
+	component := sharedmodel.Component{
+		Key: "services/api",
+		TriggeringFiles: []sharedmodel.SourceFile{
+			planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "secret source sentinel"),
+		},
+	}
+	original, err := buildFragmentRequest(
+		prompt.CodebaseSummaryV2(), settings, component,
+		sharedmodel.FragmentArchitecture, component.TriggeringFiles, nil, nil, []string{"services/api"}, nil, "full",
+		1, 2, 2, 3, 65_536, 500_000,
+	)
+	if err != nil {
+		t.Fatalf("buildFragmentRequest() error = %v", err)
+	}
+	repair, err := buildFragmentRepairRequest(prompt.CodebaseSummaryV2(), original, []byte(`{"complete":true}`), []sharedmodel.ValidationIssue{{Code: issueMissingField, Path: "/items", Message: "required field is missing"}}, 65_536, 500_000)
+	if err != nil {
+		t.Fatalf("buildFragmentRepairRequest() error = %v", err)
+	}
+	if repair.Kind != sharedmodel.RequestRepair || repair.FragmentKind != original.FragmentKind ||
+		repair.SourceBatchIndex != 1 || repair.SourceChunkIndex != 2 || string(repair.Schema) != string(original.Schema) {
+		t.Fatalf("repair metadata = %+v", repair)
+	}
+	if strings.Contains(repair.Messages[1].Content, "secret source sentinel") || strings.Contains(repair.Messages[1].Content, "services/api/a.go") {
+		t.Fatal("fragment repair expanded source or evidence scope")
+	}
+	weak := original
+	weak.Settings.MaxOutputTokens = fragmentMinimumOutputTokens - 1
+	if _, err := buildFragmentRepairRequest(prompt.CodebaseSummaryV2(), weak, []byte(`{}`), nil, 65_536, 500_000); err == nil {
+		t.Fatal("fragment repair accepted an insufficient output-token profile")
+	}
+	if _, err := buildFragmentRepairRequest(prompt.CodebaseSummaryV2(), original, []byte(`{}`), nil, fragmentMinimumResponseBytes-1, 500_000); err == nil {
+		t.Fatal("fragment repair accepted an insufficient response-byte profile")
+	}
+	if _, err := buildFragmentRepairRequest(prompt.CodebaseSummaryV2(), repair, []byte(`{}`), nil, 65_536, 500_000); err == nil {
+		t.Fatal("fragment repair response must not be repairable again")
+	}
+}
+
+func TestBuildReducerRequestsUseValidatedProjectionsOnly(t *testing.T) {
+	input := fragmentTestPlanInput()
+	settings := generationSettings(input.GenerationPolicy)
+	bundle := prompt.CodebaseSummaryV2()
+	component := normalComponent()
+	candidates := []sharedmodel.OverviewCandidate{{Title: "API", Purpose: "Candidate.", SourcePaths: []string{"services/api/a.go"}}}
+	overview, err := buildOverviewReducerRequest(bundle, settings, component, candidates, []string{"services/api/a.go"},
+		[]overviewSectionProjection{{Kind: sharedmodel.FragmentArchitecture, Count: 1, Names: []string{"Boundary"}}}, 65_536, 500_000)
+	if err != nil {
+		t.Fatalf("buildOverviewReducerRequest() error = %v", err)
+	}
+	if overview.Kind != sharedmodel.RequestOverview || overview.SchemaName != bundle.OverviewSchemaName() || string(overview.Schema) != string(bundle.OverviewSchema()) {
+		t.Fatalf("overview request contract = %+v", overview)
+	}
+	if strings.Contains(overview.Messages[1].Content, "package api") {
+		t.Fatal("overview reducer request contains raw source")
+	}
+
+	projection := diagramProjection{Architecture: []diagramArchitectureProjection{{Title: "Boundary", SourcePaths: []string{"services/api/a.go"}}}}
+	diagram, err := buildDiagramReducerRequest(bundle, settings, component, projection, []string{"services/api/a.go"}, 65_536, 500_000)
+	if err != nil {
+		t.Fatalf("buildDiagramReducerRequest() error = %v", err)
+	}
+	if diagram.Kind != sharedmodel.RequestDiagram || diagram.FragmentKind != sharedmodel.FragmentDiagrams {
+		t.Fatalf("diagram request metadata = %+v", diagram)
+	}
+	var payload diagramReducerPayload
+	user := diagram.Messages[1].Content
+	if err := json.Unmarshal([]byte(user[strings.IndexByte(user, '{'):]), &payload); err != nil {
+		t.Fatalf("decode diagram reducer payload: %v", err)
+	}
+	if !equalStrings(payload.Repository.AllowedEvidencePaths, []string{"services/api/a.go"}) || len(payload.Projection.Architecture) != 1 {
+		t.Fatalf("diagram payload = %+v", payload)
+	}
+	if strings.Contains(user, "package api") {
+		t.Fatal("diagram reducer request contains raw source")
+	}
+}
+
+func TestBuildReducerRepairPreservesContractWithoutProjection(t *testing.T) {
+	input := fragmentTestPlanInput()
+	bundle := prompt.CodebaseSummaryV2()
+	original, err := buildOverviewReducerRequest(bundle, generationSettings(input.GenerationPolicy), normalComponent(),
+		[]sharedmodel.OverviewCandidate{{Title: "API", Purpose: "Candidate.", SourcePaths: []string{"services/api/a.go"}}},
+		[]string{"services/api/a.go"}, nil, 65_536, 500_000)
+	if err != nil {
+		t.Fatalf("buildOverviewReducerRequest() error = %v", err)
+	}
+	repair, err := buildFragmentRepairRequest(bundle, original, []byte(`{}`),
+		[]sharedmodel.ValidationIssue{{Code: issueMissingField, Path: "/title", Message: "required field is missing"}}, 65_536, 500_000)
+	if err != nil {
+		t.Fatalf("buildFragmentRepairRequest() error = %v", err)
+	}
+	if repair.Kind != sharedmodel.RequestRepair || repair.SchemaName != original.SchemaName || string(repair.Schema) != string(original.Schema) {
+		t.Fatalf("reducer repair contract = %+v", repair)
+	}
+	if repair.FragmentKind != "" || !strings.Contains(repair.Messages[1].Content, `"request_kind":"overview_reducer"`) || strings.Contains(repair.Messages[1].Content, `"fragment_kind":"overview_candidate"`) {
+		t.Fatalf("overview repair identity is not preserved: %+v", repair)
+	}
+	if strings.Contains(repair.Messages[1].Content, "Candidate.") || strings.Contains(repair.Messages[1].Content, "services/api/a.go") {
+		t.Fatal("reducer repair reintroduced validated projections or evidence")
+	}
+}
+
+func TestRequestContentBytesCountsMessagesAndSchemaFallbackOnce(t *testing.T) {
 	request := sharedmodel.GenerationRequest{
 		Messages: []sharedmodel.Message{{Content: "abc"}, {Content: "de"}},
 		Schema:   []byte("12345"),
 	}
-	if got := requestContentBytes(request); got != int64(len("abc")+len("de")+len("12345")) {
-		t.Fatalf("requestContentBytes() = %d, want 10", got)
+	encoded := requestPlanningBytes(request)
+	if got := strings.Count(string(encoded), "12345"); got != 1 {
+		t.Fatalf("planning envelope contains schema %d times, want once: %s", got, encoded)
+	}
+	if !strings.Contains(string(encoded), `"role":"system"`) || !strings.Contains(string(encoded), `"messages"`) {
+		t.Fatalf("planning envelope omits message framing: %s", encoded)
+	}
+	if got, want := requestContentBytes(request), int64(len(encoded)+providerRequestEnvelopeHeadroom); got != want {
+		t.Fatalf("requestContentBytes() = %d, want complete envelope %d", got, want)
+	}
+}
+
+func TestMarshalRequestJSONDisablesHTMLExpansion(t *testing.T) {
+	encoded, err := marshalRequestJSON("<>&")
+	if err != nil {
+		t.Fatalf("marshalRequestJSON() error = %v", err)
+	}
+	if got := string(encoded); got != `"<>&"` {
+		t.Fatalf("marshalRequestJSON() = %s, want literal HTML-sensitive characters", got)
+	}
+	if got := encodedMessageContentBytes("<>&"); got != 3 {
+		t.Fatalf("encodedMessageContentBytes() = %d, want 3", got)
+	}
+	if got := encodedMessageContentBytes("\u2028"); got != 6 {
+		t.Fatalf("encoded U+2028 bytes = %d, want 6 covered by synthesis expansion headroom", got)
 	}
 }
 

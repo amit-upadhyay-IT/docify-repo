@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v2/data-models-fragment",
+  "title": "component_fragment_data_models",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["complete", "items"],
+  "properties": {
+    "complete": { "type": "boolean" },
+    "omitted_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "items": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "description", "fields", "relationships", "source_paths"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "kind": {
+            "type": "string",
+            "enum": ["entity", "value_object", "request", "response", "event", "schema", "table", "configuration", "other"]
+          },
+          "description": { "type": "string", "minLength": 1, "maxLength": 400 },
+          "fields": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "type", "description"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "type": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "description": { "type": "string", "minLength": 1, "maxLength": 200 }
+              }
+            }
+          },
+          "relationships": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["target", "kind", "description"],
+              "properties": {
+                "target": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "kind": {
+                  "type": "string",
+                  "enum": ["contains", "references", "inherits", "implements", "reads", "writes", "other"]
+                },
+                "description": { "type": "string", "minLength": 1, "maxLength": 200 }
+              }
+            }
+          },
+          "source_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        }
+      }
+    }
+  }
+}

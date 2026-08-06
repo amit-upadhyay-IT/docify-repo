@@ -310,6 +310,33 @@ func TestImageChecksScriptCoversInvariants(t *testing.T) {
 	}
 }
 
+func TestFragmentQualificationUsesLocalBinaryAndForcedStrategy(t *testing.T) {
+	root := repoRoot(t)
+	script := readFile(t, root, "scripts/qualify-fragments.sh")
+	for _, needle := range []string{
+		`go -C "$WORKTREE" build`, "worktree add --detach", "DOCIFY_GENERATION_STRATEGY=fragments",
+		"DOCIFY_QUALIFICATION_RUNS", "sync --full", `"status":"noop"`, "if ! diff -ru",
+		`cp -R "$WORKTREE"`, `rm -f "$destination/.git"`, "snapshot_output",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Errorf("fragment qualification runner is missing %q", needle)
+		}
+	}
+	if strings.Contains(script, `cat > "$WORKTREE/.docify.yml"`) || strings.Contains(script, `go -C "$ROOT" build`) {
+		t.Error("fragment qualification must preserve repository config and build the detached revision")
+	}
+	for _, fixedPath := range []string{`cp "$WORKTREE/.docify/state.json"`, `cp -R "$WORKTREE/docs/generated"`} {
+		if strings.Contains(script, fixedPath) {
+			t.Errorf("fragment qualification artifact capture must not assume %q", fixedPath)
+		}
+	}
+	for _, command := range []string{"docker run", "docker build"} {
+		if strings.Contains(strings.ToLower(script), command) {
+			t.Errorf("fragment qualification must not invoke %q", command)
+		}
+	}
+}
+
 func firstLine(text string) string {
 	if index := strings.IndexByte(text, '\n'); index >= 0 {
 		return text[:index]

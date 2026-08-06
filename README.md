@@ -146,7 +146,7 @@ Each section within a topic document is owned by a specific component. When a co
 ### Prerequisites
 
 - **Git** — available on the runner or local machine.
-- **An OpenAI-compatible LLM endpoint** — Google Gemini and Vertex AI are tested; any OpenAI-compatible endpoint works.
+- **An OpenAI-compatible LLM endpoint** — qualify the exact provider/model against the production schemas before rollout.
 - **Docker** (recommended for CI) or **Go 1.26+** (for local builds).
 - A **GitHub token** with `contents: write` and `pull-requests: write` (for the `github-pr` publisher).
 
@@ -230,6 +230,7 @@ source:
 components:
   strategy: inferred        # auto-detect from go.mod, package.json, pyproject.toml, etc.
   max_context_bytes: 120000
+  max_request_bytes: 500000
 
 documentation:
   profile: codebase-summary
@@ -240,6 +241,8 @@ llm:
   provider: openai-compatible
   model: gemini-2.0-flash   # overridable via DOCIFY_LLM_MODEL
   temperature: 0
+  max_output_tokens: 8192
+  max_response_bytes: 65536
 
 publishing:
   provider: worktree        # worktree | github-pr
@@ -252,13 +255,14 @@ publishing:
 | `DOCIFY_LLM_BASE_URL` | Yes | Base URL of your OpenAI-compatible LLM endpoint |
 | `DOCIFY_LLM_API_KEY` | Yes | API key for the LLM endpoint |
 | `DOCIFY_LLM_MODEL` | No | Overrides the model from `.docify.yml` |
+| `DOCIFY_GENERATION_STRATEGY` | No | Temporarily overrides `dossier`, `fragments`, or `auto` for qualification |
 | `DOCIFY_BASE_SHA` | Yes | The `before` commit SHA of the CI event |
 | `DOCIFY_HEAD_SHA` | Yes | The `after` (current) commit SHA |
 | `DOCIFY_GITHUB_TOKEN` | `github-pr` only | Token with `contents: write`, `pull-requests: write` |
 | `DOCIFY_GITHUB_REPOSITORY` | `github-pr` only | e.g., `owner/repo` |
 | `DOCIFY_BASE_BRANCH` | `github-pr` only | e.g., `main` |
 
-See [`docs/configuration.md`](docs/configuration.md) for the full reference, including source role overrides.
+See [`docs/configuration.md`](docs/configuration.md) for the full reference, including source role overrides, and [`docs/fragment-qualification.md`](docs/fragment-qualification.md) for fragment provider and quality rollout gates.
 
 ---
 

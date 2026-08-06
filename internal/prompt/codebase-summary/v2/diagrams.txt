@@ -1,0 +1,6 @@
+Return only typed diagrams for target.component_key from the validated projection
+supplied by the application. Return at most 1 diagram. Use at most 6 flowchart
+nodes and 8 edges, 5 sequence participants and 8 messages, or 4 classes with 3
+members each and 5 relationships. Titles are at most 100 bytes, keys 32 bytes,
+labels and members 80 bytes, and source paths 512 bytes. Never return Mermaid or
+other dossier sections.

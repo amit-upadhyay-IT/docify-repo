@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	documentationmodel "docify-repo/internal/app/documentation/model"
+	sharedmodel "docify-repo/internal/model"
 )
 
 // exitCoder mirrors the transport's exit-code extraction so tests can assert typed errors
@@ -219,6 +220,25 @@ func TestCheckReportsStaleForUnsyncedChange(t *testing.T) {
 	}
 }
 
+func TestCheckReportFailureDoesNotMaskStaleResult(t *testing.T) {
+	application, _, dir := newSyncTestbed(t)
+	bootstrap(t, application, dir)
+	writeFile(t, dir, "services/api/service.go", "package api\n\nfunc Handle() { /* pending */ }\n")
+	runGit(t, dir, "add", "services/api/service.go")
+	writeFile(t, dir, ".reports", "not a directory\n")
+	input := checkInput(dir)
+	input.SourcePolicy.ReportPath = ".reports/report.json"
+
+	result, err := application.Check(context.Background(), input)
+	var coder exitCoder
+	if !errors.As(err, &coder) || coder.ExitCode() != 2 {
+		t.Fatalf("Check() error = %v, want primary stale exit code 2", err)
+	}
+	if result.Status != "stale" {
+		t.Fatalf("status = %q, want stale", result.Status)
+	}
+}
+
 func TestCheckDetectsTamperWithoutModelCall(t *testing.T) {
 	application, generator, dir := newSyncTestbed(t)
 	bootstrap(t, application, dir)
@@ -286,6 +306,68 @@ func TestSyncFullRecoveryRebuildsAfterStateLoss(t *testing.T) {
 	}
 }
 
+func TestSyncProtectsInvalidStateUntilExplicitFullRecovery(t *testing.T) {
+	application, generator, dir := newSyncTestbed(t)
+	statePath := filepath.Join(dir, ".docify", "state.json")
+	writeFile(t, dir, ".docify/state.json", "foreign state\n")
+
+	_, err := application.Sync(context.Background(), syncInput(dir))
+	if err == nil || !strings.Contains(err.Error(), "state file exists") {
+		t.Fatalf("Sync() error = %v, want unproven state-path refusal", err)
+	}
+	if generator.calls.Load() != 0 {
+		t.Fatalf("normal recovery made %d model calls before refusing the state path", generator.calls.Load())
+	}
+	if got := readFileString(t, statePath); got != "foreign state\n" {
+		t.Fatalf("normal recovery changed foreign state to %q", got)
+	}
+
+	input := syncInput(dir)
+	input.Full = true
+	result, err := application.Sync(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Sync(--full) error = %v", err)
+	}
+	if result.Status != "synced" || result.Plan.StateStatus != "invalid" {
+		t.Fatalf("result = %+v, want explicit recovery from invalid state", result)
+	}
+	var state sharedmodel.State
+	if err := json.Unmarshal([]byte(readFileString(t, statePath)), &state); err != nil || state.SchemaVersion == 0 {
+		t.Fatalf("recovered state is invalid: %+v, %v", state, err)
+	}
+}
+
+func TestSyncGenerationIncompatibilityRetainsOwnershipProof(t *testing.T) {
+	application, generator, dir := newSyncTestbed(t)
+	bootstrap(t, application, dir)
+	statePath := filepath.Join(dir, ".docify", "state.json")
+
+	var state sharedmodel.State
+	if err := json.Unmarshal([]byte(readFileString(t, statePath)), &state); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	state.GeneratorVersion = "older-generator"
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("encode incompatible state: %v", err)
+	}
+	if err := os.WriteFile(statePath, append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write incompatible state: %v", err)
+	}
+
+	callsBefore := generator.calls.Load()
+	result, err := application.Sync(context.Background(), syncInput(dir))
+	if err != nil {
+		t.Fatalf("Sync() error = %v, want regeneration with retained ownership proof", err)
+	}
+	if result.Plan.FullReason != "state_incompatible" || result.Status != "synced" {
+		t.Fatalf("result = %+v, want successful incompatible-state regeneration", result)
+	}
+	if generator.calls.Load() <= callsBefore {
+		t.Fatal("generation incompatibility did not regenerate components")
+	}
+}
+
 func TestSyncFullRecoveryStillRefusesForeignFile(t *testing.T) {
 	application, _, dir := newSyncTestbed(t)
 	bootstrap(t, application, dir)
@@ -322,8 +404,11 @@ func TestSyncWritesStructuredRunReport(t *testing.T) {
 	if err := json.Unmarshal([]byte(reportData), &report); err != nil {
 		t.Fatalf("decode run report: %v", err)
 	}
-	if report.SchemaVersion != 1 || report.Command != "sync" || report.Status != "synced" {
-		t.Errorf("report header = %+v, want sync/synced schema 1", report)
+	if report.SchemaVersion != 5 || report.Command != "sync" || report.Status != "synced" {
+		t.Errorf("report header = %+v, want sync/synced schema 5", report)
+	}
+	if report.GenerationStrategy != "dossier" || report.PlannedLLM.Primary == 0 || report.PlannedLLM.MaximumHTTPAttempts == 0 {
+		t.Errorf("report planning metadata = strategy %q calls %+v", report.GenerationStrategy, report.PlannedLLM)
 	}
 	if report.Mode != "full" || report.FullReason != "state_missing" {
 		t.Errorf("report plan = mode %q reason %q, want full/state_missing", report.Mode, report.FullReason)
@@ -340,6 +425,38 @@ func TestSyncWritesStructuredRunReport(t *testing.T) {
 	}
 	if !report.Validation.OutputValidated {
 		t.Error("report does not record that output was validated")
+	}
+}
+
+func TestPlanRunReportPreservesFragmentCostBoundsWithoutModelCalls(t *testing.T) {
+	application, generator, dir := newSyncTestbed(t)
+	sync := syncInput(dir)
+	sync.GenerationPolicy.GenerationStrategy = "fragments"
+	sync.ComponentPolicy.MaxRequestBytes = 500_000
+	sync.SourcePolicy.ReportPath = ".docify/plan-report.json"
+	input := documentationmodel.PlanInput{
+		WorkingDirectory: sync.WorkingDirectory,
+		SourcePolicy:     sync.SourcePolicy, ComponentPolicy: sync.ComponentPolicy, GenerationPolicy: sync.GenerationPolicy,
+	}
+	result, err := application.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if generator.calls.Load() != 0 {
+		t.Fatalf("Plan() made %d model calls", generator.calls.Load())
+	}
+	var report documentationmodel.RunReport
+	data := readFileString(t, filepath.Join(dir, ".docify", "plan-report.json"))
+	if !strings.Contains(data, `"fragment_fallback_components": []`) {
+		t.Fatalf("plan report has unstable fallback component shape:\n%s", data)
+	}
+	if err := json.Unmarshal([]byte(data), &report); err != nil {
+		t.Fatalf("decode plan report: %v", err)
+	}
+	if report.SchemaVersion != 5 || report.Command != "plan" || report.GenerationStrategy != "fragments" ||
+		report.PlannedLLM.Fragment == 0 || report.PlannedLLM.MaximumLogical <= report.PlannedLLM.Primary ||
+		report.PlannedLLM.MaximumHTTPAttempts <= report.PlannedLLM.MaximumLogical {
+		t.Fatalf("plan report = %+v, result calls = %+v", report, result.Plan.Calls)
 	}
 }
 

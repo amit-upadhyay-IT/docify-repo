@@ -1,0 +1,4 @@
+Return only an overview_candidate for target.component_key. Provide one title,
+one purpose, and one or two directly supporting paths. Title is at most 100 bytes,
+purpose at most 400 bytes, and each path at most 512 bytes. Do not return section
+items, review gaps, diagrams, or facts unsupported by this source scope.

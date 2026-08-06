@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v2/dependencies-fragment",
+  "title": "component_fragment_dependencies",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["complete", "items"],
+  "properties": {
+    "complete": { "type": "boolean" },
+    "omitted_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "items": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "purpose", "component_key", "source_paths"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "kind": {
+            "type": "string",
+            "enum": ["internal_component", "external_service", "library", "tool", "protocol", "other"]
+          },
+          "purpose": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "component_key": { "type": ["string", "null"], "maxLength": 512 },
+          "source_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        }
+      }
+    }
+  }
+}

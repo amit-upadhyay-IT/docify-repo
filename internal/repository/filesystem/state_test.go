@@ -72,6 +72,25 @@ func TestStateRepositoryLoadsMissingAndRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestStateRepositoryLoadsUndecodableFileAsInvalid(t *testing.T) {
+	directory := t.TempDir()
+	repository := NewStateRepository()
+	if err := os.Mkdir(filepath.Join(directory, ".docify"), 0o700); err != nil {
+		t.Fatalf("mkdir state directory: %v", err)
+	}
+	statePath := filepath.Join(directory, ".docify", "state.json")
+	if err := os.WriteFile(statePath, []byte("foreign state\n"), 0o600); err != nil {
+		t.Fatalf("write invalid state: %v", err)
+	}
+	result, err := repository.Load(context.Background(), directory, ".docify/state.json")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !result.Invalid || result.Missing {
+		t.Fatalf("Load() = %+v, want existing invalid state", result)
+	}
+}
+
 func validTestState() sharedmodel.State {
 	hash := "sha256:" + strings.Repeat("a", 64)
 	return sharedmodel.State{

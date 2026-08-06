@@ -73,7 +73,17 @@ func (r *StateRepository) Load(ctx context.Context, rootPath, repositoryPath str
 	if len(data) > maximumStateBytes {
 		return sharedmodel.StateLoadResult{}, fmt.Errorf("state %q exceeds %d bytes", repositoryPath, maximumStateBytes)
 	}
-	return r.Decode(ctx, data)
+	result, err := r.Decode(ctx, data)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return sharedmodel.StateLoadResult{}, ctxErr
+		}
+		// Existing bytes that are not valid Docify state are distinct from a
+		// missing state path. The usecase can then protect them from normal
+		// overwrite while permitting explicitly authorized full recovery.
+		return sharedmodel.StateLoadResult{Invalid: true}, nil
+	}
+	return result, nil
 }
 
 func (r *StateRepository) Decode(ctx context.Context, data []byte) (sharedmodel.StateLoadResult, error) {

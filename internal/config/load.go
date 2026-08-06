@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	sharedmodel "docify-repo/internal/model"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -89,6 +91,7 @@ func applyEnvironment(cfg *Config, lookup environmentLookup) {
 	overrideString(lookup, "DOCIFY_REPORT_PATH", &cfg.ReportPath)
 	overrideString(lookup, "DOCIFY_LLM_BASE_URL", &cfg.LLM.BaseURL)
 	overrideString(lookup, "DOCIFY_LLM_MODEL", &cfg.LLM.Model)
+	overrideString(lookup, "DOCIFY_GENERATION_STRATEGY", &cfg.Documentation.GenerationStrategy)
 	overrideString(lookup, "DOCIFY_PUBLISHER", &cfg.Publishing.Provider)
 	overrideString(lookup, "DOCIFY_BASE_SHA", &cfg.Runtime.BaseSHA)
 	overrideString(lookup, "DOCIFY_HEAD_SHA", &cfg.Runtime.HeadSHA)
@@ -169,6 +172,11 @@ func validate(cfg Config) error {
 	default:
 		return fmt.Errorf("documentation.audience: unsupported value %q", cfg.Documentation.Audience)
 	}
+	switch cfg.Documentation.GenerationStrategy {
+	case "auto", "dossier", "fragments":
+	default:
+		return fmt.Errorf("documentation.generation_strategy: must be %q, %q, or %q", "auto", "dossier", "fragments")
+	}
 	if cfg.LLM.Provider != "openai-compatible" {
 		return fmt.Errorf("llm.provider: unsupported value %q", cfg.LLM.Provider)
 	}
@@ -180,6 +188,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.LLM.MaxOutputTokens <= 0 {
 		return fmt.Errorf("llm.max_output_tokens: must be greater than zero")
+	}
+	if cfg.LLM.MaxResponseBytes <= 0 {
+		return fmt.Errorf("llm.max_response_bytes: must be greater than zero")
 	}
 	switch cfg.LLM.StructuredOutputMode {
 	case "auto", "json_schema", "prompt_json":
@@ -195,6 +206,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.LLM.Concurrency <= 0 {
 		return fmt.Errorf("llm.concurrency: must be greater than zero")
+	}
+	if cfg.LLM.FragmentCallLimit <= 0 {
+		return fmt.Errorf("llm.fragment_call_limit_per_component: must be greater than zero")
+	}
+	if cfg.LLM.FragmentSplitDepth < 0 || cfg.LLM.FragmentSplitDepth > sharedmodel.MaximumFragmentSplitDepth {
+		return fmt.Errorf("llm.fragment_split_depth: must be between 0 and %d", sharedmodel.MaximumFragmentSplitDepth)
 	}
 	if cfg.Publishing.Provider != "worktree" && cfg.Publishing.Provider != "github-pr" {
 		return fmt.Errorf("publishing.provider: must be %q or %q", "worktree", "github-pr")

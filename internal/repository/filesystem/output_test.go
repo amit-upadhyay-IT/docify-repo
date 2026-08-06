@@ -2,6 +2,8 @@ package filesystem
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,6 +36,11 @@ func readUnder(t *testing.T, root, relative string) (string, bool) {
 
 func doc(path, content string) sharedmodel.RenderedDocument {
 	return sharedmodel.RenderedDocument{Path: path, Data: []byte(content)}
+}
+
+func outputTestHash(content string) string {
+	digest := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("sha256:%x", digest)
 }
 
 func TestOutputInstallCommitsWritesAndDeletes(t *testing.T) {
@@ -100,6 +107,28 @@ func TestOutputInstallRollsBackOnFailure(t *testing.T) {
 	}
 }
 
+func TestOutputInstallRejectsChangedPrecondition(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/keep.md", "changed after validation")
+
+	repository := NewOutputRepository()
+	transaction := sharedmodel.OutputTransaction{
+		Writes: []sharedmodel.RenderedDocument{doc("docs/generated/keep.md", "candidate")},
+		Preconditions: []sharedmodel.OutputPrecondition{{
+			Path: "docs/generated/keep.md", MustExist: true, ContentHash: outputTestHash("validated content"),
+		}},
+	}
+	if err := repository.Install(context.Background(), root, transaction); err == nil {
+		t.Fatal("Install() error = nil, want changed-precondition refusal")
+	}
+	if content, ok := readUnder(t, root, "docs/generated/keep.md"); !ok || content != "changed after validation" {
+		t.Fatalf("keep.md = %q ok=%t, want concurrent content untouched", content, ok)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(transactionDir))); !os.IsNotExist(err) {
+		t.Errorf("transaction directory was not cleaned up: %v", err)
+	}
+}
+
 func TestOutputRecoverRollsForwardCommitted(t *testing.T) {
 	root := t.TempDir()
 	writeUnder(t, root, "docs/generated/live.md", "installed")
@@ -113,7 +142,7 @@ func TestOutputRecoverRollsForwardCommitted(t *testing.T) {
 		t.Fatalf("seed commit marker: %v", err)
 	}
 
-	if err := NewOutputRepository().Recover(context.Background(), root); err != nil {
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
 		t.Fatalf("Recover() error = %v", err)
 	}
 	if content, ok := readUnder(t, root, "docs/generated/live.md"); !ok || content != "installed" {
@@ -124,24 +153,195 @@ func TestOutputRecoverRollsForwardCommitted(t *testing.T) {
 	}
 }
 
-func TestOutputRecoverRollsBackUncommitted(t *testing.T) {
+func TestOutputRecoverPreservesBackupForManualRecovery(t *testing.T) {
 	root := t.TempDir()
-	// A placed write with no commit marker, plus its pre-install backup.
-	writeUnder(t, root, "docs/generated/page.md", "half-written")
+	// A crash after backup moved the original but before candidate installation.
 	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
-	if err := writeJournal(txDir, journal{Writes: []string{"docs/generated/page.md"}, Deletes: nil}); err != nil {
+	if err := writeJournal(txDir, journal{
+		Writes:      []string{"docs/generated/page.md"},
+		WriteHashes: map[string]string{"docs/generated/page.md": outputTestHash("candidate")},
+		Preconditions: []sharedmodel.OutputPrecondition{{
+			Path: "docs/generated/page.md", MustExist: true, ContentHash: outputTestHash("original"),
+		}},
+	}); err != nil {
 		t.Fatalf("seed journal: %v", err)
 	}
 	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md", "original")
 
-	if err := NewOutputRepository().Recover(context.Background(), root); err != nil {
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want conservative manual recovery")
+	}
+	if _, ok := readUnder(t, root, "docs/generated/page.md"); ok {
+		t.Fatal("recovery installed untrusted backup content")
+	}
+	if content, ok := readUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md"); !ok || content != "original" {
+		t.Fatalf("backup = %q ok=%t, want preserved", content, ok)
+	}
+}
+
+func TestOutputRecoverPreservesConcurrentConflict(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/page.md", "concurrent edit")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes: []string{"docs/generated/page.md"},
+		WriteHashes: map[string]string{
+			"docs/generated/page.md": outputTestHash("candidate"),
+		},
+		Preconditions: []sharedmodel.OutputPrecondition{{
+			Path: "docs/generated/page.md", MustExist: true, ContentHash: outputTestHash("original"),
+		}},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md", "original")
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want ownership conflict")
+	}
+	if content, ok := readUnder(t, root, "docs/generated/page.md"); !ok || content != "concurrent edit" {
+		t.Fatalf("live page = %q ok=%t, want concurrent edit preserved", content, ok)
+	}
+	if content, ok := readUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md"); !ok || content != "original" {
+		t.Fatalf("backup page = %q ok=%t, want original preserved", content, ok)
+	}
+	if _, err := os.Stat(filepath.Join(txDir, transactionConflict)); err != nil {
+		t.Fatalf("conflict marker missing: %v", err)
+	}
+}
+
+func TestOutputRecoverRecognizesPreMutationOriginal(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/page.md", "original")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes: []string{"docs/generated/page.md"},
+		WriteHashes: map[string]string{
+			"docs/generated/page.md": outputTestHash("candidate"),
+		},
+		Preconditions: []sharedmodel.OutputPrecondition{{
+			Path: "docs/generated/page.md", MustExist: true, ContentHash: outputTestHash("original"),
+		}},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
 		t.Fatalf("Recover() error = %v", err)
 	}
 	if content, ok := readUnder(t, root, "docs/generated/page.md"); !ok || content != "original" {
-		t.Errorf("page.md = %q ok=%t, want the backup restored", content, ok)
+		t.Fatalf("page = %q ok=%t, want untouched original", content, ok)
 	}
 	if _, err := os.Stat(txDir); !os.IsNotExist(err) {
-		t.Errorf("recover did not clean up rolled-back transaction: %v", err)
+		t.Fatalf("transaction directory remains: %v", err)
+	}
+}
+
+func TestOutputRecoverPreservesUntouchedOriginalMatchingCandidate(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/page.md", "same bytes")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes:      []string{"docs/generated/page.md"},
+		WriteHashes: map[string]string{"docs/generated/page.md": outputTestHash("same bytes")},
+		Preconditions: []sharedmodel.OutputPrecondition{{
+			Path: "docs/generated/page.md", MustExist: true, ContentHash: outputTestHash("same bytes"),
+		}},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	if content, ok := readUnder(t, root, "docs/generated/page.md"); !ok || content != "same bytes" {
+		t.Fatalf("page = %q ok=%t, want untouched original", content, ok)
+	}
+}
+
+func TestOutputRecoverRejectsUnsafeJournalPaths(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repository")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatalf("mkdir repository: %v", err)
+	}
+	outside := filepath.Join(parent, "outside.txt")
+	if err := os.WriteFile(outside, []byte("preserve me"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes: []string{"../outside.txt"}, WriteHashes: map[string]string{"../outside.txt": outputTestHash("preserve me")},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want unsafe journal rejection")
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil || string(data) != "preserve me" {
+		t.Fatalf("outside file = %q, %v; want preserved", data, err)
+	}
+}
+
+func TestOutputRecoverRejectsJournalTargetOutsideGeneratedOutput(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, ".git/config", "preserve git config")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes: []string{".git/config"}, WriteHashes: map[string]string{".git/config": outputTestHash("preserve git config")},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want generated-output boundary rejection")
+	}
+	if content, ok := readUnder(t, root, ".git/config"); !ok || content != "preserve git config" {
+		t.Fatalf("git config = %q ok=%t, want preserved", content, ok)
+	}
+}
+
+func TestOutputRecoverRejectsUnjournaledBackup(t *testing.T) {
+	root := t.TempDir()
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes:        []string{"docs/generated/page.md"},
+		WriteHashes:   map[string]string{"docs/generated/page.md": outputTestHash("candidate")},
+		Preconditions: []sharedmodel.OutputPrecondition{{Path: "docs/generated/page.md"}},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/other.md", "forged backup")
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want unjournaled backup rejection")
+	}
+	if _, ok := readUnder(t, root, "docs/generated/other.md"); ok {
+		t.Fatal("unjournaled backup was restored into generated output")
+	}
+	if content, ok := readUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/other.md"); !ok || content != "forged backup" {
+		t.Fatalf("backup = %q ok=%t, want preserved for inspection", content, ok)
+	}
+}
+
+func TestOutputRecoverRefusesHashOnlyJournalWithoutChangingLiveFile(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/page.md", "preserve me")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes:      []string{"docs/generated/page.md"},
+		WriteHashes: map[string]string{"docs/generated/page.md": outputTestHash("preserve me")},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
+		t.Fatal("Recover() error = nil, want ownership-precondition refusal")
+	}
+	if content, ok := readUnder(t, root, "docs/generated/page.md"); !ok || content != "preserve me" {
+		t.Fatalf("live file = %q ok=%t, want preserved", content, ok)
 	}
 }
 

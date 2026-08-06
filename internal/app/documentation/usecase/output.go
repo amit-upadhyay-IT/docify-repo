@@ -163,19 +163,41 @@ type ownershipDecision struct {
 	deletes []string
 }
 
+const unprovenStatePathMessage = "the configured state file exists but was not decoded as Docify state; restore valid state or rerun with --full to authorize recovery"
+const unprovenGeneratedOutputMessage = "generated files exist but no valid prior state proves ownership; restore valid state or rerun with --full to rebuild"
+
+func validateStatePathOwnership(existing sharedmodel.ExistingOutput, stateOwned, fullRecovery bool) error {
+	if existing.StateExists && !stateOwned && !fullRecovery {
+		return outputValidationError{unprovenStatePathMessage}
+	}
+	return nil
+}
+
+func validateGeneratedOwnershipPrerequisite(existing sharedmodel.ExistingOutput, hasProvenState, fullRecovery bool) error {
+	if !hasProvenState && !fullRecovery && len(existing.GeneratedPaths) > 0 {
+		return outputValidationError{unprovenGeneratedOutputMessage}
+	}
+	return nil
+}
+
 // resolveOwnership enforces the conservative recovery rules before any write. It fails
 // when generated output exists that prior state does not own, so a handwritten or
 // externally created file can never be overwritten or deleted.
 //
+//   - An existing state path must have decoded as Docify state, unless the run is an
+//     explicitly authorized full recovery.
 //   - Missing/incompatible prior state with existing generated files fails, unless the run
 //     is an explicit full recovery (--full). Even then, an existing file the candidate does
 //     not produce is never touched.
 //   - With valid prior state, every currently present generated path and every candidate
 //     write target must be owned by prior state, unless it is a brand-new expected path.
 //   - Deletions are the prior-owned generated paths that the candidate no longer produces.
-func resolveOwnership(existing sharedmodel.ExistingOutput, priorOwned map[string]struct{}, hasProvenState bool, candidatePaths map[string]struct{}, fullRecovery bool) (ownershipDecision, error) {
-	if !hasProvenState && !fullRecovery && len(existing.GeneratedPaths) > 0 {
-		return ownershipDecision{}, outputValidationError{"generated files exist but no valid prior state proves ownership; restore valid state or rerun with --full to rebuild"}
+func resolveOwnership(existing sharedmodel.ExistingOutput, priorOwned map[string]struct{}, stateOwned, hasProvenState bool, candidatePaths map[string]struct{}, fullRecovery bool) (ownershipDecision, error) {
+	if err := validateStatePathOwnership(existing, stateOwned, fullRecovery); err != nil {
+		return ownershipDecision{}, err
+	}
+	if err := validateGeneratedOwnershipPrerequisite(existing, hasProvenState, fullRecovery); err != nil {
+		return ownershipDecision{}, err
 	}
 
 	for _, existingPath := range existing.GeneratedPaths {

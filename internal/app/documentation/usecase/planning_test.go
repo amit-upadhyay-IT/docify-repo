@@ -9,6 +9,7 @@ import (
 
 	documentationmodel "docify-repo/internal/app/documentation/model"
 	sharedmodel "docify-repo/internal/model"
+	"docify-repo/internal/prompt"
 )
 
 func TestBuildGenerationPlanBootstrapsMissingState(t *testing.T) {
@@ -395,7 +396,7 @@ func TestBuildGenerationPlanCreatesStableBatchesAndSynthesis(t *testing.T) {
 	input := testPlanInput()
 	input.ComponentPolicy.MaxContextBytes = 100
 	input.ComponentPolicy.MaxBatchBytes = 70
-	input.ComponentPolicy.MaxRequestBytes = 100_000
+	input.ComponentPolicy.MaxRequestBytes = 500_000
 	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
 		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, strings.Repeat("a", 60)),
 		planSource("services/api/b.go", sharedmodel.RoleProductionSource, true, strings.Repeat("b", 60)),
@@ -430,6 +431,244 @@ func TestBuildGenerationPlanRejectsInfeasibleSynthesis(t *testing.T) {
 	}
 }
 
+func TestSynthesisWorstCaseUsesConfiguredResponseCeiling(t *testing.T) {
+	bundle := prompt.CodebaseSummaryV1()
+	component := sharedmodel.Component{Key: "services/api"}
+	settings := generationSettings(testPlanInput().GenerationPolicy)
+	first := synthesisWorstCaseBytes(bundle, settings, component, []string{"services/api"}, 2, 100)
+	second := synthesisWorstCaseBytes(bundle, settings, component, []string{"services/api"}, 2, 200)
+	wantDelta := int64(2 * responseJSONExpansionFactor * 100)
+	if second-first != wantDelta {
+		t.Fatalf("synthesis estimate delta = %d, want %d", second-first, wantDelta)
+	}
+}
+
+func TestSynthesisWorstCaseSaturatesOnIntegerOverflow(t *testing.T) {
+	bundle := prompt.CodebaseSummaryV1()
+	component := sharedmodel.Component{Key: "services/api"}
+	settings := generationSettings(testPlanInput().GenerationPolicy)
+	got := synthesisWorstCaseBytes(bundle, settings, component, []string{"services/api"}, 2, int64(^uint64(0)>>1))
+	if got != int64(^uint64(0)>>1) {
+		t.Fatalf("synthesis estimate = %d, want saturated maximum", got)
+	}
+}
+
+func TestBuildGenerationPlanRejectsSynthesisByteOverflow(t *testing.T) {
+	input := testPlanInput()
+	input.ComponentPolicy.MaxContextBytes = 100
+	input.ComponentPolicy.MaxBatchBytes = 70
+	input.ComponentPolicy.MaxRequestBytes = int64(^uint64(0) >> 1)
+	input.GenerationPolicy.MaxResponseBytes = int64(^uint64(0) >> 1)
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, strings.Repeat("a", 60)),
+		planSource("services/api/b.go", sharedmodel.RoleProductionSource, true, strings.Repeat("b", 60)),
+	})
+	_, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "synthesis request estimate exceeds integer capacity") {
+		t.Fatalf("buildGenerationPlan() error = %v, want synthesis byte overflow", err)
+	}
+}
+
+func TestBuildGenerationPlanFragmentsHasNoDossierSynthesis(t *testing.T) {
+	input := fragmentTestPlanInput()
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "package api\n"),
+	})
+	plan, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err != nil {
+		t.Fatalf("buildGenerationPlan() error = %v", err)
+	}
+	wantFragments := len(fragmentMapKinds())
+	if plan.GenerationStrategy != "fragments" || plan.Calls.Fragment != wantFragments || plan.Calls.OverviewReducer != 1 || plan.Calls.DiagramReducer != 1 {
+		t.Fatalf("calls = %+v, want one fragment map and reducer plan", plan.Calls)
+	}
+	if plan.Calls.Synthesis != 0 || plan.Calls.Batch != 0 || plan.Calls.Primary != wantFragments+2 || plan.Calls.MaximumLogical != input.GenerationPolicy.FragmentCallLimit {
+		t.Fatalf("calls = %+v, fragment mode must not plan dossier synthesis", plan.Calls)
+	}
+	if plan.Calls.MaximumTransportFallback != plan.Calls.MaximumLogical {
+		t.Fatalf("transport fallbacks = %d, want every primary and repair call covered", plan.Calls.MaximumTransportFallback)
+	}
+	if plan.Calls.TypicalLogical != plan.Calls.Primary || plan.Calls.MaximumFragmentRepairCalls != 40 ||
+		plan.Calls.MaximumSourceSplitCalls != 79 || plan.Calls.StructuredModesAttempted != 2 ||
+		plan.Calls.TransportRetries != 2 || plan.Calls.MaximumHTTPAttempts != 480 {
+		t.Fatalf("dynamic call estimates = %+v", plan.Calls)
+	}
+	if len(plan.Calls.Fragments) != len(fragmentMapKinds()) || plan.Calls.Fragments[0].PlannedCalls != 1 ||
+		plan.Calls.Fragments[0].PlannedRequestBytes == 0 || plan.Calls.Fragments[0].MaximumRepairRequestBytes == 0 {
+		t.Fatalf("fragment estimates = %+v", plan.Calls.Fragments)
+	}
+	if plan.Calls.OverviewRequestBytes == 0 || plan.Calls.OverviewRepairBytes == 0 ||
+		plan.Calls.DiagramRequestBytes == 0 || plan.Calls.DiagramRepairBytes == 0 {
+		t.Fatalf("reducer byte estimates = %+v", plan.Calls)
+	}
+}
+
+func TestBuildGenerationPlanAutoUsesDossierForFastPathComponent(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.GenerationPolicy.GenerationStrategy = "auto"
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "package api\n"),
+	})
+	plan, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err != nil {
+		t.Fatalf("buildGenerationPlan() error = %v", err)
+	}
+	if plan.GenerationStrategy != "auto" || len(plan.AffectedComponents) != 1 || plan.AffectedComponents[0].GenerationStrategy != "dossier" {
+		t.Fatalf("plan = %+v, want auto with a dossier component decision", plan)
+	}
+	if plan.Calls.Normal != 1 || plan.Calls.DossierFastPath != 1 || plan.Calls.Fragment != 0 || plan.Calls.Synthesis != 0 {
+		t.Fatalf("calls = %+v, want one planned fast-path call", plan.Calls)
+	}
+	if !plan.AffectedComponents[0].FragmentFallbackPlan || plan.Calls.MaximumTruncationFallbackCalls != 79 ||
+		plan.Calls.FallbackRequestBytes == 0 || len(plan.AffectedComponents[0].Fragments) != len(fragmentMapKinds()) ||
+		plan.AffectedComponents[0].Fragments[0].FallbackCalls != 1 {
+		t.Fatalf("auto fallback estimates = plan %+v calls %+v", plan.AffectedComponents[0], plan.Calls)
+	}
+	if plan.Calls.OverviewFallbackBytes == 0 || plan.Calls.DiagramFallbackBytes == 0 {
+		t.Fatalf("auto reducer fallback bytes = %+v", plan.Calls)
+	}
+	if plan.Calls.MaximumRepair != 40 || plan.Calls.MaximumFragmentRepairCalls != 39 || plan.Calls.MaximumSourceSplitCalls != 78 {
+		t.Fatalf("auto dynamic bounds = %+v", plan.Calls)
+	}
+}
+
+func TestBuildGenerationPlanAutoUsesFragmentsForPreBatchedComponent(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.GenerationPolicy.GenerationStrategy = "auto"
+	input.ComponentPolicy.MaxContextBytes = 40
+	input.ComponentPolicy.MaxBatchBytes = 30
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, strings.Repeat("a", 30)),
+		planSource("services/api/b.go", sharedmodel.RoleProductionSource, true, strings.Repeat("b", 30)),
+	})
+	plan, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err != nil {
+		t.Fatalf("buildGenerationPlan() error = %v", err)
+	}
+	if len(plan.AffectedComponents) != 1 || plan.AffectedComponents[0].GenerationStrategy != "fragments" {
+		t.Fatalf("affected components = %+v, want pre-call fragment decision", plan.AffectedComponents)
+	}
+	if plan.Calls.Normal != 0 || plan.Calls.Batch != 0 || plan.Calls.Synthesis != 0 || plan.Calls.Fragment != 2*len(fragmentMapKinds()) {
+		t.Fatalf("calls = %+v, pre-batched auto mode must avoid the dossier batch path", plan.Calls)
+	}
+}
+
+func TestBuildGenerationPlanRejectsMaximumCallOverflow(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.GenerationPolicy.FragmentCallLimit = int(^uint(0) >> 1)
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "package api\n"),
+		planSource("services/web/a.go", sharedmodel.RoleProductionSource, true, "package web\n"),
+	})
+	_, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "exceeds integer capacity") {
+		t.Fatalf("buildGenerationPlan() error = %v, want checked maximum-call overflow", err)
+	}
+}
+
+func TestPlanFragmentGenerationChunksSingleFileAtNewlines(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.ComponentPolicy.MaxBatchBytes = 12
+	input.GenerationPolicy.FragmentCallLimit = 80
+	component := sharedmodel.Component{
+		Key: "services/api",
+		TriggeringFiles: []sharedmodel.SourceFile{
+			planSource("services/api/large.go", sharedmodel.RoleProductionSource, true, "line-one\nline-two\nline-three\n"),
+		},
+	}
+	plan, err := planFragmentGeneration(prompt.CodebaseSummaryV2(), generationSettings(input.GenerationPolicy), component, nil, nil,
+		[]string{component.Key}, nil, "full", input)
+	if err != nil {
+		t.Fatalf("planFragmentGeneration() error = %v", err)
+	}
+	if len(plan.sourceScopes) != 3 {
+		t.Fatalf("source scopes = %d, want 3 newline chunks", len(plan.sourceScopes))
+	}
+	for index, scope := range plan.sourceScopes {
+		if scope.batchIndex != 1 || scope.chunkIndex != index+1 || scope.chunkCount != 3 || sourcePaths(scope.source)[0] != "services/api/large.go" {
+			t.Fatalf("scope %d = %+v, want stable original evidence identity", index, scope)
+		}
+	}
+}
+
+func TestSplitRuntimeFragmentSourceOverlapsSingleFileAtNewline(t *testing.T) {
+	file := planSource("services/api/a.go", sharedmodel.RoleProductionSource, true,
+		"line one\nline two\nline three\nline four\n")
+	children, available := splitRuntimeFragmentSource([]sharedmodel.SourceFile{file})
+	if !available || len(children) != 2 || len(children[0]) != 1 || len(children[1]) != 1 {
+		t.Fatalf("children = %+v available=%t, want two source chunks", children, available)
+	}
+	left, right := children[0][0], children[1][0]
+	if left.Path != file.Path || right.Path != file.Path || left.Size >= file.Size || right.Size >= file.Size {
+		t.Fatalf("left=%+v right=%+v, want narrower chunks with original evidence identity", left, right)
+	}
+	if !strings.HasSuffix(string(left.Data), "line two\n") || !strings.HasPrefix(string(right.Data), "line two\n") {
+		t.Fatalf("left=%q right=%q, want bounded line overlap", left.Data, right.Data)
+	}
+}
+
+func TestSplitRuntimeFragmentSourceBisectsMultipleFiles(t *testing.T) {
+	source := []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "a"),
+		planSource("services/api/b.go", sharedmodel.RoleProductionSource, true, "b"),
+		planSource("services/api/c.go", sharedmodel.RoleProductionSource, true, "c"),
+		planSource("services/api/d.go", sharedmodel.RoleProductionSource, true, "d"),
+	}
+	children, available := splitRuntimeFragmentSource(source)
+	if !available || len(children) != 2 || !reflect.DeepEqual(sourcePaths(children[0]), []string{"services/api/a.go", "services/api/b.go"}) ||
+		!reflect.DeepEqual(sourcePaths(children[1]), []string{"services/api/c.go", "services/api/d.go"}) {
+		t.Fatalf("children = %+v, want stable midpoint split", children)
+	}
+}
+
+func TestPlanFragmentGenerationRefinesRequestOversizeBelowBatchLimit(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.ComponentPolicy.MaxContextBytes = 200_000
+	input.ComponentPolicy.MaxBatchBytes = 200_000
+	content := strings.Repeat(strings.Repeat("\\", 99)+"\n", 1_500)
+	component := sharedmodel.Component{Key: "services/api", TriggeringFiles: []sharedmodel.SourceFile{
+		planSource("services/api/escaped.go", sharedmodel.RoleProductionSource, true, content),
+	}}
+	plan, err := planFragmentGeneration(prompt.CodebaseSummaryV2(), generationSettings(input.GenerationPolicy), component, nil, nil,
+		[]string{component.Key}, nil, "full", input)
+	if err != nil {
+		t.Fatalf("planFragmentGeneration() error = %v", err)
+	}
+	if len(plan.sourceScopes) < 2 || plan.sourceScopes[0].batchIndex != 1 || plan.sourceScopes[0].chunkCount != len(plan.sourceScopes) {
+		t.Fatalf("source scopes = %+v, want request-size-driven newline chunks", plan.sourceScopes)
+	}
+	for _, request := range plan.mapRequests {
+		if size := requestContentBytes(request.request); size > input.ComponentPolicy.MaxRequestBytes {
+			t.Fatalf("planned request size = %d, exceeds %d", size, input.ComponentPolicy.MaxRequestBytes)
+		}
+	}
+}
+
+func TestPlanFragmentGenerationRejectsUnsplittableLongLine(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.ComponentPolicy.MaxContextBytes = 200_000
+	input.ComponentPolicy.MaxBatchBytes = 200_000
+	component := sharedmodel.Component{Key: "services/api", TriggeringFiles: []sharedmodel.SourceFile{
+		planSource("services/api/escaped.go", sharedmodel.RoleProductionSource, true, strings.Repeat("\\", 150_000)),
+	}}
+	_, err := planFragmentGeneration(prompt.CodebaseSummaryV2(), generationSettings(input.GenerationPolicy), component, nil, nil,
+		[]string{component.Key}, nil, "full", input)
+	if err == nil || !strings.Contains(err.Error(), "no internal newline boundary") {
+		t.Fatalf("planFragmentGeneration() error = %v, want deterministic newline-boundary failure", err)
+	}
+}
+
+func TestPlanFragmentGenerationRejectsCallCeilingBeforeCalls(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.GenerationPolicy.FragmentCallLimit = 17
+	component := normalComponent()
+	_, err := planFragmentGeneration(prompt.CodebaseSummaryV2(), generationSettings(input.GenerationPolicy), component, nil, nil,
+		[]string{component.Key}, nil, "full", input)
+	if err == nil || !strings.Contains(err.Error(), "18 logical calls") {
+		t.Fatalf("planFragmentGeneration() error = %v, want pre-call ceiling rejection", err)
+	}
+}
+
 func ownedFixture(t *testing.T, input documentationmodel.PlanInput, files []sharedmodel.SourceFile) ([]sharedmodel.SourceFile, []sharedmodel.Component) {
 	t.Helper()
 	components, owned, err := discoverComponents(files, input.ComponentPolicy, input.SourcePolicy.DocsDir)
@@ -447,7 +686,8 @@ func compatibleFixtureState(t *testing.T, input documentationmodel.PlanInput, fi
 	}
 	state := sharedmodel.State{
 		SchemaVersion: stateSchemaVersion, GeneratorVersion: generatorVersion, PlannerVersion: plannerVersion,
-		PromptVersion: promptVersion, OutputSchemaVersion: outputSchemaVersion, ConfigHash: aggregate, ConfigHashes: hashes,
+		PromptVersion: promptVersion, RenderVersion: renderVersion, OutputSchemaVersion: outputSchemaVersion,
+		ConfigHash: aggregate, ConfigHashes: hashes,
 		Files: make(map[string]sharedmodel.StateFile), Components: make(map[string]sharedmodel.StateComponent),
 	}
 	for _, file := range files {
@@ -462,6 +702,100 @@ func compatibleFixtureState(t *testing.T, input documentationmodel.PlanInput, fi
 		}
 	}
 	return state
+}
+
+func TestStateCompatibilityChecksGeneratorAndRenderVersions(t *testing.T) {
+	compatible := sharedmodel.StateLoadResult{State: sharedmodel.State{
+		SchemaVersion: stateSchemaVersion, GeneratorVersion: generatorVersion, PlannerVersion: plannerVersion,
+		PromptVersion: promptVersion, RenderVersion: renderVersion, OutputSchemaVersion: outputSchemaVersion,
+	}}
+	if _, ok := stateCompatibility(compatible); !ok {
+		t.Fatal("current versions should be compatible")
+	}
+
+	wrongGenerator := compatible
+	wrongGenerator.State.GeneratorVersion = "older"
+	if _, ok := stateCompatibility(wrongGenerator); ok {
+		t.Fatal("generator version mismatch should be incompatible")
+	}
+	wrongRender := compatible
+	wrongRender.State.RenderVersion = "older"
+	if _, ok := stateCompatibility(wrongRender); ok {
+		t.Fatal("render version mismatch should be incompatible")
+	}
+	missingOutputSchema := compatible
+	missingOutputSchema.State.OutputSchemaVersion = ""
+	if _, ok := stateCompatibility(missingOutputSchema); ok {
+		t.Fatal("missing output schema version should require migration")
+	}
+}
+
+func TestGenerationConfigurationHashIncludesFragmentAndMergeIdentity(t *testing.T) {
+	policy := fragmentTestPlanInput().GenerationPolicy
+	baseline, err := generationConfigurationHash(policy, fragmentMergeVersion)
+	if err != nil {
+		t.Fatalf("generationConfigurationHash() error = %v", err)
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*documentationmodel.GenerationPolicy) string
+	}{
+		{name: "strategy", mutate: func(policy *documentationmodel.GenerationPolicy) string {
+			policy.GenerationStrategy = "auto"
+			return fragmentMergeVersion
+		}},
+		{name: "call limit", mutate: func(policy *documentationmodel.GenerationPolicy) string {
+			policy.FragmentCallLimit++
+			return fragmentMergeVersion
+		}},
+		{name: "split depth", mutate: func(policy *documentationmodel.GenerationPolicy) string {
+			policy.FragmentSplitDepth++
+			return fragmentMergeVersion
+		}},
+		{name: "merge", mutate: func(_ *documentationmodel.GenerationPolicy) string { return "next" }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changedPolicy := policy
+			mergeVersion := test.mutate(&changedPolicy)
+			changed, err := generationConfigurationHash(changedPolicy, mergeVersion)
+			if err != nil {
+				t.Fatalf("generationConfigurationHash() error = %v", err)
+			}
+			if changed == baseline {
+				t.Fatal("generation identity change did not alter the hash")
+			}
+		})
+	}
+}
+
+func TestBuildGenerationPlanReportsHTTPAttemptOverflow(t *testing.T) {
+	input := fragmentTestPlanInput()
+	input.GenerationPolicy.TransportRetries = int(^uint(0) >> 1)
+	files, components := ownedFixture(t, input, []sharedmodel.SourceFile{
+		planSource("services/api/a.go", sharedmodel.RoleProductionSource, true, "package api\n"),
+	})
+	_, err := buildGenerationPlan(input, components, files, sharedmodel.StateLoadResult{Missing: true}, nil, false)
+	if err == nil || !strings.Contains(err.Error(), "HTTP attempt estimate exceeds integer capacity") {
+		t.Fatalf("buildGenerationPlan() error = %v, want HTTP-attempt overflow", err)
+	}
+}
+
+func TestConfigurationHashIncludesEndpointIdentity(t *testing.T) {
+	input := testPlanInput()
+	input.GenerationPolicy.EndpointHash = "sha256:endpoint-a"
+	first, _, err := configurationHashes(input)
+	if err != nil {
+		t.Fatalf("configurationHashes() error = %v", err)
+	}
+	input.GenerationPolicy.EndpointHash = "sha256:endpoint-b"
+	second, _, err := configurationHashes(input)
+	if err != nil {
+		t.Fatalf("configurationHashes() error = %v", err)
+	}
+	if first.Generation == second.Generation {
+		t.Fatal("endpoint identity change did not change generation configuration hash")
+	}
 }
 
 func hashText(value string) string {

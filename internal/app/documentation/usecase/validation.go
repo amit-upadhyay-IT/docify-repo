@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -31,6 +32,7 @@ const (
 	issueDiagramFieldUnset = "diagram_field_not_allowed"
 	issueDiagramReference  = "invalid_diagram_reference"
 	issueDuplicateKey      = "duplicate_key"
+	issueInvalidValue      = "invalid_value"
 )
 
 // maxValidationIssues bounds the issues embedded in a repair request so it stays
@@ -56,16 +58,15 @@ func validateDossier(body []byte, allowedEvidence, catalog []string) dossierVali
 		evidence: toSet(allowedEvidence),
 		catalog:  toSet(catalog),
 		used:     make(map[string]struct{}),
+		limits:   dossierLimits,
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
 	var dossier sharedmodel.ComponentDossier
-	if err := decoder.Decode(&dossier); err != nil {
-		return dossierValidation{issues: []sharedmodel.ValidationIssue{decodeIssue(err)}}
+	if issue := decodeStrict(body, &dossier); issue != nil {
+		return dossierValidation{issues: []sharedmodel.ValidationIssue{*issue}}
 	}
-	if decoder.More() {
-		return dossierValidation{issues: []sharedmodel.ValidationIssue{{Code: issueTrailingData, Path: "", Message: "response contains data after the JSON object"}}}
+	if issues := dossierShapeIssues(body); len(issues) > 0 {
+		return dossierValidation{dossier: dossier, issues: issues}
 	}
 
 	validator.validate(dossier)
@@ -84,6 +85,7 @@ type dossierValidator struct {
 	used     map[string]struct{}
 	issues   []sharedmodel.ValidationIssue
 	stopped  bool
+	limits   validationLimits
 }
 
 func (d *dossierValidator) add(code, path, message string) {
@@ -98,89 +100,111 @@ func (d *dossierValidator) add(code, path, message string) {
 }
 
 func (d *dossierValidator) validate(dossier sharedmodel.ComponentDossier) {
-	d.prose("/title", dossier.Title, schemaMaxTitle, true)
-	d.prose("/purpose", dossier.Purpose, schemaMaxLongText, true)
-	d.evidencePaths("/source_paths", dossier.SourcePaths, schemaMaxSourcePaths, false)
+	d.prose("/title", dossier.Title, d.limits.title, true)
+	d.prose("/purpose", dossier.Purpose, d.limits.longText, true)
+	d.evidencePaths("/source_paths", dossier.SourcePaths, d.limits.sourcePaths, false)
+	d.architectureItems("/architecture", dossier.Architecture, schemaMaxItemsPerSection)
+	d.interfaceItems("/interfaces", dossier.Interfaces, schemaMaxItemsPerSection)
+	d.dataModelItems("/data_models", dossier.DataModels, schemaMaxItemsPerSection)
+	d.workflowItems("/workflows", dossier.Workflows, schemaMaxItemsPerSection)
+	d.dependencyItems("/dependencies", dossier.Dependencies, schemaMaxItemsPerSection)
+	d.reviewGapItems("/review_gaps", dossier.ReviewGaps, schemaMaxItemsPerSection)
+	d.diagramItems("/diagrams", dossier.Diagrams, schemaMaxDiagrams)
+}
 
-	d.maxItems("/architecture", len(dossier.Architecture), schemaMaxItemsPerSection)
-	for index, item := range dossier.Architecture {
-		base := fmt.Sprintf("/architecture/%d", index)
-		d.prose(base+"/title", item.Title, schemaMaxTitle, true)
-		d.prose(base+"/description", item.Description, schemaMaxLongText, true)
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, true)
+// Section validators are shared by complete dossiers and fragments. Their callers
+// supply separate top-level limits and validators carry the matching nested limits.
+func (d *dossierValidator) architectureItems(path string, items []sharedmodel.ArchitectureItem, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
+		d.prose(base+"/title", item.Title, d.limits.title, true)
+		d.prose(base+"/description", item.Description, d.limits.longText, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, true)
 	}
+}
 
-	d.maxItems("/interfaces", len(dossier.Interfaces), schemaMaxItemsPerSection)
-	for index, item := range dossier.Interfaces {
-		base := fmt.Sprintf("/interfaces/%d", index)
-		d.prose(base+"/name", item.Name, schemaMaxName, true)
+func (d *dossierValidator) interfaceItems(path string, items []sharedmodel.InterfaceItem, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
+		d.prose(base+"/name", item.Name, d.limits.name, true)
 		d.enum(base+"/kind", item.Kind, interfaceKinds)
 		d.enum(base+"/direction", item.Direction, interfaceDirections)
-		d.prose(base+"/description", item.Description, schemaMaxLongText, true)
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, true)
+		d.prose(base+"/description", item.Description, d.limits.longText, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, true)
 	}
+}
 
-	d.maxItems("/data_models", len(dossier.DataModels), schemaMaxItemsPerSection)
-	for index, item := range dossier.DataModels {
-		base := fmt.Sprintf("/data_models/%d", index)
-		d.prose(base+"/name", item.Name, schemaMaxName, true)
+func (d *dossierValidator) dataModelItems(path string, items []sharedmodel.DataModelItem, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
+		d.prose(base+"/name", item.Name, d.limits.name, true)
 		d.enum(base+"/kind", item.Kind, dataModelKinds)
-		d.prose(base+"/description", item.Description, schemaMaxLongText, true)
-		d.maxItems(base+"/fields", len(item.Fields), schemaMaxFields)
+		d.prose(base+"/description", item.Description, d.limits.longText, true)
+		d.maxItems(base+"/fields", len(item.Fields), d.limits.fields)
 		for fieldIndex, field := range item.Fields {
 			fieldBase := fmt.Sprintf("%s/fields/%d", base, fieldIndex)
-			d.prose(fieldBase+"/name", field.Name, schemaMaxName, true)
-			d.prose(fieldBase+"/type", field.Type, schemaMaxType, true)
-			d.prose(fieldBase+"/description", field.Description, schemaMaxShortText, true)
+			d.prose(fieldBase+"/name", field.Name, d.limits.name, true)
+			d.prose(fieldBase+"/type", field.Type, d.limits.typeName, true)
+			d.prose(fieldBase+"/description", field.Description, d.limits.shortText, true)
 		}
-		d.maxItems(base+"/relationships", len(item.Relationships), schemaMaxRelationships)
+		d.maxItems(base+"/relationships", len(item.Relationships), d.limits.relationships)
 		for relationIndex, relation := range item.Relationships {
 			relationBase := fmt.Sprintf("%s/relationships/%d", base, relationIndex)
-			d.prose(relationBase+"/target", relation.Target, schemaMaxName, true)
+			d.prose(relationBase+"/target", relation.Target, d.limits.name, true)
 			d.enum(relationBase+"/kind", relation.Kind, dataRelationshipKinds)
-			d.prose(relationBase+"/description", relation.Description, schemaMaxShortText, true)
+			d.prose(relationBase+"/description", relation.Description, d.limits.shortText, true)
 		}
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, true)
 	}
+}
 
-	d.maxItems("/workflows", len(dossier.Workflows), schemaMaxItemsPerSection)
-	for index, item := range dossier.Workflows {
-		base := fmt.Sprintf("/workflows/%d", index)
-		d.prose(base+"/name", item.Name, schemaMaxName, true)
-		d.prose(base+"/description", item.Description, schemaMaxLongText, true)
-		d.maxItems(base+"/steps", len(item.Steps), schemaMaxSteps)
+func (d *dossierValidator) workflowItems(path string, items []sharedmodel.WorkflowItem, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
+		d.prose(base+"/name", item.Name, d.limits.name, true)
+		d.prose(base+"/description", item.Description, d.limits.longText, true)
+		d.maxItems(base+"/steps", len(item.Steps), d.limits.steps)
 		for stepIndex, step := range item.Steps {
 			stepBase := fmt.Sprintf("%s/steps/%d", base, stepIndex)
-			d.prose(stepBase+"/actor", step.Actor, schemaMaxName, true)
-			d.prose(stepBase+"/action", step.Action, schemaMaxShortText, true)
-			d.prose(stepBase+"/target", step.Target, schemaMaxName, false)
+			d.prose(stepBase+"/actor", step.Actor, d.limits.name, true)
+			d.prose(stepBase+"/action", step.Action, d.limits.shortText, true)
+			d.prose(stepBase+"/target", step.Target, d.limits.name, false)
 		}
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, true)
 	}
+}
 
-	d.maxItems("/dependencies", len(dossier.Dependencies), schemaMaxItemsPerSection)
-	for index, item := range dossier.Dependencies {
-		base := fmt.Sprintf("/dependencies/%d", index)
-		d.prose(base+"/name", item.Name, schemaMaxName, true)
+func (d *dossierValidator) dependencyItems(path string, items []sharedmodel.DependencyItem, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
+		d.prose(base+"/name", item.Name, d.limits.name, true)
 		d.enum(base+"/kind", item.Kind, dependencyKinds)
-		d.prose(base+"/purpose", item.Purpose, schemaMaxShortText, true)
+		d.prose(base+"/purpose", item.Purpose, d.limits.shortText, true)
 		d.dependencyComponent(base+"/component_key", item.Kind, item.ComponentKey)
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, true)
 	}
+}
 
-	d.maxItems("/review_gaps", len(dossier.ReviewGaps), schemaMaxItemsPerSection)
-	for index, item := range dossier.ReviewGaps {
-		base := fmt.Sprintf("/review_gaps/%d", index)
+func (d *dossierValidator) reviewGapItems(path string, items []sharedmodel.ReviewGap, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, item := range items {
+		base := fmt.Sprintf("%s/%d", path, index)
 		d.enum(base+"/kind", item.Kind, reviewGapKinds)
-		d.prose(base+"/description", item.Description, schemaMaxLongText, true)
-		d.prose(base+"/recommendation", item.Recommendation, schemaMaxShortText, true)
-		// A review gap may cite no evidence when it reports missing or excluded input.
-		d.evidencePaths(base+"/source_paths", item.SourcePaths, schemaMaxSourcePaths, false)
+		d.prose(base+"/description", item.Description, d.limits.longText, true)
+		d.prose(base+"/recommendation", item.Recommendation, d.limits.shortText, true)
+		d.evidencePaths(base+"/source_paths", item.SourcePaths, d.limits.sourcePaths, false)
 	}
+}
 
-	d.maxItems("/diagrams", len(dossier.Diagrams), schemaMaxDiagrams)
-	for index, diagram := range dossier.Diagrams {
-		d.diagram(fmt.Sprintf("/diagrams/%d", index), diagram)
+func (d *dossierValidator) diagramItems(path string, items []sharedmodel.Diagram, limit int) {
+	d.maxItems(path, len(items), limit)
+	for index, diagram := range items {
+		d.diagram(fmt.Sprintf("%s/%d", path, index), diagram)
 	}
 }
 
@@ -230,8 +254,8 @@ func (d *dossierValidator) evidencePaths(path string, paths []string, limit int,
 			d.add(issueEmptyValue, itemPath, "evidence path must not be empty")
 			continue
 		}
-		if len(candidate) > schemaMaxPath {
-			d.add(issueStringTooLong, itemPath, fmt.Sprintf("evidence path exceeds the %d-byte limit", schemaMaxPath))
+		if len(candidate) > d.limits.path {
+			d.add(issueStringTooLong, itemPath, fmt.Sprintf("evidence path exceeds the %d-byte limit", d.limits.path))
 		}
 		if _, duplicate := seen[candidate]; duplicate {
 			d.add(issueDuplicateKey, itemPath, "duplicate evidence path")
@@ -254,17 +278,21 @@ func (d *dossierValidator) dependencyComponent(path, kind, componentKey string) 
 	if trimmed == "" {
 		return
 	}
-	if len(trimmed) > schemaMaxPath {
-		d.add(issueStringTooLong, path, fmt.Sprintf("component_key exceeds the %d-byte limit", schemaMaxPath))
+	if componentKey != trimmed {
+		d.add(issueInvalidValue, path, "component_key must match a catalog key exactly")
+		return
 	}
-	if _, ok := d.catalog[trimmed]; !ok {
+	if len(componentKey) > d.limits.path {
+		d.add(issueStringTooLong, path, fmt.Sprintf("component_key exceeds the %d-byte limit", d.limits.path))
+	}
+	if _, ok := d.catalog[componentKey]; !ok {
 		d.add(issueUnknownComponent, path, "component_key is not in the component catalog")
 	}
 }
 
 func (d *dossierValidator) diagram(path string, diagram sharedmodel.Diagram) {
-	d.prose(path+"/title", diagram.Title, schemaMaxTitle, true)
-	d.evidencePaths(path+"/source_paths", diagram.SourcePaths, schemaMaxSourcePaths, true)
+	d.prose(path+"/title", diagram.Title, d.limits.title, true)
+	d.evidencePaths(path+"/source_paths", diagram.SourcePaths, d.limits.sourcePaths, true)
 
 	switch diagram.Type {
 	case sharedmodel.DiagramFlowchart:
@@ -298,8 +326,8 @@ func (d *dossierValidator) forbidDiagramFields(path string, diagram sharedmodel.
 }
 
 func (d *dossierValidator) flowchart(path string, diagram sharedmodel.Diagram) {
-	d.maxItems(path+"/nodes", len(diagram.Nodes), schemaMaxFlowchartNodes)
-	d.maxItems(path+"/edges", len(diagram.Edges), schemaMaxFlowchartEdges)
+	d.maxItems(path+"/nodes", len(diagram.Nodes), d.limits.flowchartNodes)
+	d.maxItems(path+"/edges", len(diagram.Edges), d.limits.flowchartEdges)
 	keys := make(map[string]struct{}, len(diagram.Nodes))
 	for index, node := range diagram.Nodes {
 		nodePath := fmt.Sprintf("%s/nodes/%d", path, index)
@@ -315,8 +343,8 @@ func (d *dossierValidator) flowchart(path string, diagram sharedmodel.Diagram) {
 }
 
 func (d *dossierValidator) sequence(path string, diagram sharedmodel.Diagram) {
-	d.maxItems(path+"/participants", len(diagram.Participants), schemaMaxSequenceParties)
-	d.maxItems(path+"/messages", len(diagram.Messages), schemaMaxSequenceMessages)
+	d.maxItems(path+"/participants", len(diagram.Participants), d.limits.sequenceParties)
+	d.maxItems(path+"/messages", len(diagram.Messages), d.limits.sequenceMessages)
 	keys := make(map[string]struct{}, len(diagram.Participants))
 	for index, participant := range diagram.Participants {
 		participantPath := fmt.Sprintf("%s/participants/%d", path, index)
@@ -332,14 +360,14 @@ func (d *dossierValidator) sequence(path string, diagram sharedmodel.Diagram) {
 }
 
 func (d *dossierValidator) classDiagram(path string, diagram sharedmodel.Diagram) {
-	d.maxItems(path+"/classes", len(diagram.Classes), schemaMaxClassNodes)
-	d.maxItems(path+"/relationships", len(diagram.Relationships), schemaMaxClassRelationship)
+	d.maxItems(path+"/classes", len(diagram.Classes), d.limits.classNodes)
+	d.maxItems(path+"/relationships", len(diagram.Relationships), d.limits.classRelationships)
 	keys := make(map[string]struct{}, len(diagram.Classes))
 	for index, class := range diagram.Classes {
 		classPath := fmt.Sprintf("%s/classes/%d", path, index)
 		d.diagramKey(classPath+"/key", class.Key, keys)
 		d.label(classPath+"/label", class.Label, true)
-		d.maxItems(classPath+"/members", len(class.Members), schemaMaxClassMembers)
+		d.maxItems(classPath+"/members", len(class.Members), d.limits.classMembers)
 		for memberIndex, member := range class.Members {
 			d.label(fmt.Sprintf("%s/members/%d", classPath, memberIndex), member, true)
 		}
@@ -358,8 +386,8 @@ func (d *dossierValidator) diagramKey(path, key string, keys map[string]struct{}
 		d.add(issueEmptyValue, path, "diagram key is required")
 		return
 	}
-	if len(key) > schemaMaxDiagramKey {
-		d.add(issueStringTooLong, path, fmt.Sprintf("diagram key exceeds the %d-byte limit", schemaMaxDiagramKey))
+	if len(key) > d.limits.diagramKey {
+		d.add(issueStringTooLong, path, fmt.Sprintf("diagram key exceeds the %d-byte limit", d.limits.diagramKey))
 	}
 	if _, duplicate := keys[key]; duplicate {
 		d.add(issueDuplicateKey, path, "duplicate diagram key")
@@ -385,8 +413,8 @@ func (d *dossierValidator) label(path, value string, required bool) {
 		}
 		return
 	}
-	if len(value) > schemaMaxDiagramLabel {
-		d.add(issueStringTooLong, path, fmt.Sprintf("label exceeds the %d-byte limit", schemaMaxDiagramLabel))
+	if len(value) > d.limits.diagramLabel {
+		d.add(issueStringTooLong, path, fmt.Sprintf("label exceeds the %d-byte limit", d.limits.diagramLabel))
 	}
 	if reason := unsafeLabelReason(value); reason != "" {
 		d.add(issueUnsafeProse, path, "label must be plain text: "+reason+" is not allowed")
@@ -405,12 +433,26 @@ func decodeIssue(err error) sharedmodel.ValidationIssue {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "unknown field"):
-		return sharedmodel.ValidationIssue{Code: issueUnknownField, Path: "", Message: message}
+		return sharedmodel.ValidationIssue{Code: issueUnknownField, Path: "", Message: "response contains a field not present in the schema"}
 	case strings.Contains(message, "cannot unmarshal"):
-		return sharedmodel.ValidationIssue{Code: issueInvalidType, Path: "", Message: message}
+		return sharedmodel.ValidationIssue{Code: issueInvalidType, Path: "", Message: "response contains a value with the wrong JSON type"}
 	default:
 		return sharedmodel.ValidationIssue{Code: issueInvalidJSON, Path: "", Message: "response is not valid JSON for the schema"}
 	}
+}
+
+func decodeStrict(body []byte, destination any) *sharedmodel.ValidationIssue {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		issue := decodeIssue(err)
+		return &issue
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return &sharedmodel.ValidationIssue{Code: issueTrailingData, Path: "", Message: "response contains data after the JSON object"}
+	}
+	return nil
 }
 
 var (

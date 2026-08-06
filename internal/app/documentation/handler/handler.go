@@ -47,6 +47,11 @@ func (h *Handler) Sync(ctx context.Context, options documentationmodel.RawSyncOp
 	}
 	result, err := h.usecase.Sync(ctx, input)
 	if err != nil {
+		// Generation failures return a safe partial summary. Diagnostic output is best
+		// effort and must not replace the primary generation error.
+		if result.Command != "" {
+			_ = h.writeResult(result, input.Output)
+		}
 		return err
 	}
 
@@ -166,10 +171,11 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 
 	if _, err := fmt.Fprintf(
 		h.output,
-		"command=%s status=%s mode=%s state=%s noop=%t tracked_paths=%d included_paths=%d triggering_paths=%d excluded_paths=%d components=%d affected_components=%d normal_calls=%d batch_calls=%d synthesis_calls=%d maximum_repair_calls=%d maximum_transport_fallback_calls=%d llm_calls=%d request_bytes=%d conservative_tokens=%d typical_tokens=%d\n",
+		"command=%s status=%s mode=%s generation_strategy=%s state=%s noop=%t tracked_paths=%d included_paths=%d triggering_paths=%d excluded_paths=%d components=%d affected_components=%d normal_calls=%d dossier_fast_path_calls=%d batch_calls=%d synthesis_calls=%d fragment_calls=%d overview_reducer_calls=%d diagram_reducer_calls=%d llm_calls=%d typical_logical_calls=%d typical_truncation_fallback_calls=%d maximum_repair_calls=%d maximum_fragment_repair_calls=%d maximum_truncation_fallback_calls=%d maximum_source_split_calls=%d maximum_logical_calls=%d maximum_transport_fallback_calls=%d structured_modes_attempted=%d transport_retries=%d maximum_http_attempts=%d request_bytes=%d fallback_request_bytes=%d overview_reducer_request_bytes=%d overview_reducer_fallback_request_bytes=%d overview_reducer_maximum_repair_request_bytes=%d diagram_reducer_request_bytes=%d diagram_reducer_fallback_request_bytes=%d diagram_reducer_maximum_repair_request_bytes=%d conservative_tokens=%d typical_tokens=%d\n",
 		result.Command,
 		result.Status,
 		result.Plan.Mode,
+		result.Plan.GenerationStrategy,
 		result.Plan.StateStatus,
 		result.Plan.Noop,
 		result.TrackedPaths,
@@ -179,12 +185,32 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 		len(result.Plan.Components),
 		len(result.Plan.AffectedComponents),
 		result.Plan.Calls.Normal,
+		result.Plan.Calls.DossierFastPath,
 		result.Plan.Calls.Batch,
 		result.Plan.Calls.Synthesis,
-		result.Plan.Calls.MaximumRepair,
-		result.Plan.Calls.MaximumTransportFallback,
+		result.Plan.Calls.Fragment,
+		result.Plan.Calls.OverviewReducer,
+		result.Plan.Calls.DiagramReducer,
 		result.Plan.Calls.Primary,
+		result.Plan.Calls.TypicalLogical,
+		result.Plan.Calls.TypicalTruncationFallbackCalls,
+		result.Plan.Calls.MaximumRepair,
+		result.Plan.Calls.MaximumFragmentRepairCalls,
+		result.Plan.Calls.MaximumTruncationFallbackCalls,
+		result.Plan.Calls.MaximumSourceSplitCalls,
+		result.Plan.Calls.MaximumLogical,
+		result.Plan.Calls.MaximumTransportFallback,
+		result.Plan.Calls.StructuredModesAttempted,
+		result.Plan.Calls.TransportRetries,
+		result.Plan.Calls.MaximumHTTPAttempts,
 		result.Plan.Calls.RequestBytes,
+		result.Plan.Calls.FallbackRequestBytes,
+		result.Plan.Calls.OverviewRequestBytes,
+		result.Plan.Calls.OverviewFallbackBytes,
+		result.Plan.Calls.OverviewRepairBytes,
+		result.Plan.Calls.DiagramRequestBytes,
+		result.Plan.Calls.DiagramFallbackBytes,
+		result.Plan.Calls.DiagramRepairBytes,
 		result.Plan.Calls.ConservativeTokens,
 		result.Plan.Calls.TypicalTokens,
 	); err != nil {
@@ -193,7 +219,7 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 	if outcome := result.Generation; outcome != nil {
 		if _, err := fmt.Fprintf(
 			h.output,
-			"generated_components=%d installed_paths=%d deleted_paths=%d added=%d changed=%d normal_calls=%d batch_calls=%d synthesis_calls=%d repair_calls=%d usage_present=%t prompt_tokens=%d completion_tokens=%d total_tokens=%d\n",
+			"generated_components=%d installed_paths=%d deleted_paths=%d added=%d changed=%d normal_calls=%d batch_calls=%d synthesis_calls=%d fragment_calls=%d overview_reducer_calls=%d diagram_reducer_calls=%d repair_calls=%d fragment_fallbacks=%d fragment_fallback_components=%q fragment_source_splits=%d fragment_source_split_calls=%d retained_saturated_scopes=%d overview_fallbacks=%d diagram_fallbacks=%d transport_attempts=%d usage_present=%t prompt_tokens=%d completion_tokens=%d total_tokens=%d\n",
 			outcome.GeneratedComponents,
 			outcome.InstalledPaths,
 			outcome.DeletedPaths,
@@ -202,13 +228,48 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 			outcome.NormalCalls,
 			outcome.BatchCalls,
 			outcome.SynthesisCalls,
+			outcome.FragmentCalls,
+			outcome.OverviewReducerCalls,
+			outcome.DiagramReducerCalls,
 			outcome.RepairCalls,
+			outcome.FragmentFallbacks,
+			strings.Join(outcome.FragmentFallbackComponents, ","),
+			outcome.FragmentSourceSplits,
+			outcome.FragmentSourceSplitCalls,
+			outcome.SaturatedScopes,
+			outcome.OverviewFallbacks,
+			outcome.DiagramFallbacks,
+			outcome.TransportAttempts,
 			outcome.Usage.Present,
 			outcome.Usage.PromptTokens,
 			outcome.Usage.CompletionTokens,
 			outcome.Usage.TotalTokens,
 		); err != nil {
 			return fmt.Errorf("write generation outcome: %w", err)
+		}
+	}
+	if failure := result.Failure; failure != nil {
+		if _, err := fmt.Fprintf(
+			h.output,
+			"failure_category=%s component=%q request_kind=%s batch=%d/%d fragment_kind=%s source_batch=%d/%d source_chunk=%d/%d source_split_path=%q finish_reason=%q provider_request_id=%q structured_output=%s transport_attempts=%d validation_codes=%q\n",
+			failure.Category,
+			failure.ComponentKey,
+			failure.RequestKind,
+			failure.BatchIndex,
+			failure.BatchCount,
+			failure.FragmentKind,
+			failure.SourceBatchIndex,
+			failure.SourceBatchCount,
+			failure.SourceChunkIndex,
+			failure.SourceChunkCount,
+			failure.SourceSplitPath,
+			failure.FinishReason,
+			failure.ProviderRequestID,
+			failure.StructuredOutputUsed,
+			failure.TransportAttempts,
+			strings.Join(failure.ValidationCodes, ","),
+		); err != nil {
+			return fmt.Errorf("write generation failure: %w", err)
 		}
 	}
 	for _, file := range result.Files {
@@ -261,14 +322,21 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 	for _, affected := range result.Plan.AffectedComponents {
 		if _, err := fmt.Fprintf(
 			h.output,
-			"affected_component=%q action=%s reasons=%q document=%q input_hash=%s batches=%d synthesis_request_bytes=%d\n",
+			"affected_component=%q action=%s generation_strategy=%s fragment_fallback_plan=%t fragment_fallback=%t reasons=%q document=%q input_hash=%s batches=%d synthesis_request_bytes=%d overview_reducer_request_bytes=%d overview_reducer_maximum_repair_request_bytes=%d diagram_reducer_request_bytes=%d diagram_reducer_maximum_repair_request_bytes=%d\n",
 			affected.Key,
 			affected.Action,
+			affected.GenerationStrategy,
+			affected.FragmentFallbackPlan,
+			affected.FragmentFallback,
 			strings.Join(affected.Reasons, ","),
 			affected.Document,
 			affected.InputHash,
 			len(affected.Batches),
 			affected.SynthesisRequestBytes,
+			affected.OverviewRequestBytes,
+			affected.OverviewRepairBytes,
+			affected.DiagramRequestBytes,
+			affected.DiagramRepairBytes,
 		); err != nil {
 			return fmt.Errorf("write affected component: %w", err)
 		}
@@ -286,6 +354,21 @@ func (h *Handler) writeResult(result documentationmodel.ResultSummary, mode docu
 				batch.TypicalTokens,
 			); err != nil {
 				return fmt.Errorf("write component batch: %w", err)
+			}
+		}
+		for _, fragment := range affected.Fragments {
+			if _, err := fmt.Fprintf(
+				h.output,
+				"component=%q fragment_kind=%s planned_calls=%d fallback_calls=%d planned_request_bytes=%d fallback_request_bytes=%d maximum_repair_request_bytes=%d\n",
+				affected.Key,
+				fragment.Kind,
+				fragment.PlannedCalls,
+				fragment.FallbackCalls,
+				fragment.PlannedRequestBytes,
+				fragment.FallbackRequestBytes,
+				fragment.MaximumRepairRequestBytes,
+			); err != nil {
+				return fmt.Errorf("write component fragment estimate: %w", err)
 			}
 		}
 	}

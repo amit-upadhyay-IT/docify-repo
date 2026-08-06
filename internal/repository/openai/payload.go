@@ -1,8 +1,8 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
 	"unicode/utf8"
 
 	sharedmodel "docify-repo/internal/model"
@@ -52,9 +52,23 @@ type responsesFormat struct {
 }
 
 func buildBody(request sharedmodel.GenerationRequest, structured sharedmodel.StructuredOutputMode) ([]byte, error) {
-	messages := make([]chatMessage, 0, len(request.Messages))
+	capacity := len(request.Messages)
+	if structured == sharedmodel.StructuredOutputPromptJSON {
+		capacity++
+	}
+	messages := make([]chatMessage, 0, capacity)
+	schemaInserted := false
 	for _, message := range request.Messages {
+		if structured == sharedmodel.StructuredOutputPromptJSON && !schemaInserted && message.Role != sharedmodel.RoleSystem {
+			schemaMessage := sharedmodel.PromptJSONSchemaMessage(request.Schema)
+			messages = append(messages, chatMessage{Role: string(schemaMessage.Role), Content: schemaMessage.Content})
+			schemaInserted = true
+		}
 		messages = append(messages, chatMessage{Role: string(message.Role), Content: message.Content})
+	}
+	if structured == sharedmodel.StructuredOutputPromptJSON && !schemaInserted {
+		schemaMessage := sharedmodel.PromptJSONSchemaMessage(request.Schema)
+		messages = append(messages, chatMessage{Role: string(schemaMessage.Role), Content: schemaMessage.Content})
 	}
 
 	if request.Settings.APIMode == sharedmodel.APIModeResponses {
@@ -65,7 +79,7 @@ func buildBody(request sharedmodel.GenerationRequest, structured sharedmodel.Str
 			Input:           messages,
 			Text:            responsesTextFormat(structured, request),
 		}
-		return json.Marshal(payload)
+		return marshalProviderBody(payload)
 	}
 
 	payload := chatRequest{
@@ -75,7 +89,17 @@ func buildBody(request sharedmodel.GenerationRequest, structured sharedmodel.Str
 		Messages:       messages,
 		ResponseFormat: chatResponseFormat(structured, request),
 	}
-	return json.Marshal(payload)
+	return marshalProviderBody(payload)
+}
+
+func marshalProviderBody(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
 }
 
 func chatResponseFormat(structured sharedmodel.StructuredOutputMode, request sharedmodel.GenerationRequest) *responseFormat {
@@ -126,10 +150,15 @@ type chatChoice struct {
 }
 
 type responsesResponse struct {
-	ID     string          `json:"id"`
-	Output []responsesItem `json:"output"`
-	Status string          `json:"status"`
-	Usage  *responsesUsage `json:"usage"`
+	ID                string                     `json:"id"`
+	Output            []responsesItem            `json:"output"`
+	Status            string                     `json:"status"`
+	IncompleteDetails *responsesIncompleteDetail `json:"incomplete_details"`
+	Usage             *responsesUsage            `json:"usage"`
+}
+
+type responsesIncompleteDetail struct {
+	Reason string `json:"reason"`
 }
 
 type responsesItem struct {
@@ -167,20 +196,32 @@ func normalizeResponse(mode sharedmodel.APIMode, raw []byte, maxContent int64) (
 func normalizeChat(raw []byte, maxContent int64) (sharedmodel.GenerationResponse, error) {
 	var envelope chatResponse
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return sharedmodel.GenerationResponse{}, fmt.Errorf("llm response envelope is not valid JSON")
+		return sharedmodel.GenerationResponse{}, &sharedmodel.CompletionError{Category: sharedmodel.CompletionFailureInvalidEnvelope}
 	}
 	if len(envelope.Choices) == 0 {
-		return sharedmodel.GenerationResponse{}, fmt.Errorf("llm response contained no choices")
+		return sharedmodel.GenerationResponse{}, &sharedmodel.CompletionError{
+			Category: sharedmodel.CompletionFailureEmpty, ProviderRequestID: safeProviderRequestIDValue(envelope.ID),
+		}
 	}
 	choice := envelope.Choices[0]
-	content, err := boundedContent(choice.Message.Content, choice.FinishReason, maxContent)
+	finishReason := safeCompletionReason(choice.FinishReason)
+	if choice.FinishReason != "stop" {
+		category := sharedmodel.CompletionFailureIncomplete
+		if choice.FinishReason == "length" {
+			category = sharedmodel.CompletionFailureTruncated
+		}
+		return sharedmodel.GenerationResponse{}, &sharedmodel.CompletionError{
+			Category: category, FinishReason: finishReason, ProviderRequestID: safeProviderRequestIDValue(envelope.ID),
+		}
+	}
+	content, err := boundedContent(choice.Message.Content, finishReason, safeProviderRequestIDValue(envelope.ID), maxContent)
 	if err != nil {
 		return sharedmodel.GenerationResponse{}, err
 	}
 	response := sharedmodel.GenerationResponse{
 		Body:              content,
-		FinishReason:      choice.FinishReason,
-		ProviderRequestID: envelope.ID,
+		FinishReason:      finishReason,
+		ProviderRequestID: safeProviderRequestIDValue(envelope.ID),
 	}
 	if envelope.Usage != nil {
 		response.Usage = sharedmodel.TokenUsage{
@@ -194,7 +235,20 @@ func normalizeChat(raw []byte, maxContent int64) (sharedmodel.GenerationResponse
 func normalizeResponses(raw []byte, maxContent int64) (sharedmodel.GenerationResponse, error) {
 	var envelope responsesResponse
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return sharedmodel.GenerationResponse{}, fmt.Errorf("llm response envelope is not valid JSON")
+		return sharedmodel.GenerationResponse{}, &sharedmodel.CompletionError{Category: sharedmodel.CompletionFailureInvalidEnvelope}
+	}
+	if envelope.Status != "completed" {
+		category := sharedmodel.CompletionFailureIncomplete
+		finishReason := safeCompletionReason(envelope.Status)
+		if envelope.IncompleteDetails != nil {
+			finishReason = safeCompletionReason(envelope.IncompleteDetails.Reason)
+			if envelope.Status == "incomplete" && envelope.IncompleteDetails.Reason == "max_output_tokens" {
+				category = sharedmodel.CompletionFailureTruncated
+			}
+		}
+		return sharedmodel.GenerationResponse{}, &sharedmodel.CompletionError{
+			Category: category, FinishReason: finishReason, ProviderRequestID: safeProviderRequestIDValue(envelope.ID),
+		}
 	}
 	text := ""
 	for _, item := range envelope.Output {
@@ -204,15 +258,15 @@ func normalizeResponses(raw []byte, maxContent int64) (sharedmodel.GenerationRes
 			}
 		}
 	}
-	finishReason := envelope.Status
-	content, err := boundedContent(text, finishReason, maxContent)
+	finishReason := safeCompletionReason(envelope.Status)
+	content, err := boundedContent(text, finishReason, safeProviderRequestIDValue(envelope.ID), maxContent)
 	if err != nil {
 		return sharedmodel.GenerationResponse{}, err
 	}
 	response := sharedmodel.GenerationResponse{
 		Body:              content,
 		FinishReason:      finishReason,
-		ProviderRequestID: envelope.ID,
+		ProviderRequestID: safeProviderRequestIDValue(envelope.ID),
 	}
 	if envelope.Usage != nil {
 		response.Usage = sharedmodel.TokenUsage{
@@ -223,18 +277,22 @@ func normalizeResponses(raw []byte, maxContent int64) (sharedmodel.GenerationRes
 	return response, nil
 }
 
-func boundedContent(content, finishReason string, maxContent int64) ([]byte, error) {
-	if finishReason == "length" {
-		return nil, fmt.Errorf("llm response was truncated at the output token limit")
-	}
+func boundedContent(content, finishReason, providerRequestID string, maxContent int64) ([]byte, error) {
 	if content == "" {
-		return nil, fmt.Errorf("llm response contained no content")
+		return nil, &sharedmodel.CompletionError{
+			Category: sharedmodel.CompletionFailureEmpty, FinishReason: finishReason, ProviderRequestID: providerRequestID,
+		}
 	}
 	if int64(len(content)) > maxContent {
-		return nil, fmt.Errorf("llm response content exceeds the %d-byte limit", maxContent)
+		return nil, &sharedmodel.CompletionError{
+			Category: sharedmodel.CompletionFailureResponseTooLarge, FinishReason: finishReason,
+			ProviderRequestID: providerRequestID, ResponseLimitBytes: maxContent,
+		}
 	}
 	if !utf8.ValidString(content) {
-		return nil, fmt.Errorf("llm response content is not valid UTF-8")
+		return nil, &sharedmodel.CompletionError{
+			Category: sharedmodel.CompletionFailureInvalidUTF8, FinishReason: finishReason, ProviderRequestID: providerRequestID,
+		}
 	}
 	return []byte(content), nil
 }
