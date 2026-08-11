@@ -1,0 +1,22 @@
+.github/workflows/docify-repo.yml
+  s_4c8e587ada28d8::t_e9afddc6dcc3d0 65
+.docify.yml
+  s_4c8e587ada28d8::t_e9afddc6dcc3d0 1-6,8-11
+  s_4c8e587ada28d8::t_43dec088c2cb15 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "39e3813136ed1b4578d442b786bbfe3727ba8fdb",
+  "prompts": {},
+  "sessions": {
+    "s_4c8e587ada28d8": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_00e3447e7ffekACOAZQSRYjVTY",
+        "model": "gpt-5-6-sol"
+      },
+      "human_author": "amit-upadhyay-IT <amitupadhyayemail@gmail.com>"
+    }
+  }
+}
