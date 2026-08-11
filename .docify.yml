@@ -8,4 +8,5 @@ components:
   max_request_bytes: 750000
 
 llm:
+  structured_output_mode: prompt_json
   fragment_call_limit_per_component: 120
