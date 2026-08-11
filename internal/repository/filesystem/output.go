@@ -364,9 +364,7 @@ func (r *OutputRepository) Recover(ctx context.Context, rootPath, docsDir, state
 	if err != nil {
 		return err
 	}
-	if _, statErr := os.Lstat(filepath.Join(txPath, transactionConflict)); statErr == nil {
-		return fmt.Errorf("transaction has an output ownership conflict; preserve %q and recover it manually", filepath.ToSlash(filepath.Join(transactionDir, transactionBackup)))
-	} else if !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Lstat(filepath.Join(txPath, transactionConflict)); statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("inspect transaction conflict marker: %w", statErr)
 	}
 
@@ -380,8 +378,80 @@ func (r *OutputRepository) Recover(ctx context.Context, rootPath, docsDir, state
 	if len(record.Preconditions) > 0 {
 		return recoverHashedTransaction(rootPath, txPath, record, targets)
 	}
+	if len(record.WriteHashes) == 0 {
+		return recoverLegacyTransaction(rootPath, txPath, record, targets)
+	}
 	_ = writeFileSynced(filepath.Join(txPath, transactionConflict), []byte("conflict\n"))
 	return fmt.Errorf("transaction journal lacks ownership preconditions; preserve %q and recover it manually", filepath.ToSlash(txPath))
+}
+
+// recoverLegacyTransaction rolls back the original writes/deletes-only journal format.
+// A missing staged write proves that the old rename-based installer moved that candidate;
+// writes still in staging were not installed and their live paths remain untouched.
+func recoverLegacyTransaction(rootPath, txPath string, record journal, targets map[string]struct{}) error {
+	stagingPath := filepath.Join(txPath, transactionStaging)
+	stagingInfo, err := os.Lstat(stagingPath)
+	if err != nil || !stagingInfo.IsDir() {
+		_ = writeFileSynced(filepath.Join(txPath, transactionConflict), []byte("conflict\n"))
+		return fmt.Errorf("legacy transaction has an invalid staging directory; preserve %q and recover it manually", filepath.ToSlash(txPath))
+	}
+	backupPath := filepath.Join(txPath, transactionBackup)
+	backupInfo, err := os.Lstat(backupPath)
+	if err != nil || !backupInfo.IsDir() {
+		_ = writeFileSynced(filepath.Join(txPath, transactionConflict), []byte("conflict\n"))
+		return fmt.Errorf("legacy transaction has an invalid backup directory; preserve %q and recover it manually", filepath.ToSlash(txPath))
+	}
+
+	conflict := false
+	_ = filepath.WalkDir(backupPath, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			conflict = true
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(backupPath, current)
+		if err != nil {
+			conflict = true
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		if _, planned := targets[relative]; !planned || entry.Type()&os.ModeType != 0 {
+			conflict = true
+		}
+		return nil
+	})
+
+	installed := make(map[string]string)
+	for _, path := range record.Writes {
+		staged := filepath.Join(stagingPath, filepath.FromSlash(path))
+		info, err := os.Lstat(staged)
+		if err == nil {
+			if !info.Mode().IsRegular() {
+				conflict = true
+			}
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			conflict = true
+			continue
+		}
+		live, err := os.ReadFile(filepath.Join(rootPath, filepath.FromSlash(path)))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			conflict = true
+			continue
+		}
+		installed[path] = outputContentHash(live)
+	}
+	if conflict {
+		_ = writeFileSynced(filepath.Join(txPath, transactionConflict), []byte("conflict\n"))
+		return fmt.Errorf("legacy transaction has an output ownership conflict; backups were preserved")
+	}
+	return rollbackRuntime(rootPath, txPath, installed, targets)
 }
 
 // recoverHashedTransaction can safely roll back a modern transaction regardless of
@@ -414,44 +484,16 @@ func recoverHashedTransaction(rootPath, txPath string, record journal, targets m
 		preconditions[precondition.Path] = precondition
 	}
 	conflict := false
-	for _, path := range record.Writes {
-		fullPath := filepath.Join(rootPath, filepath.FromSlash(path))
-		data, err := os.ReadFile(fullPath)
-		if errors.Is(err, os.ErrNotExist) {
-			precondition, known := preconditions[path]
-			if !known || precondition.MustExist {
-				conflict = true
-			}
-			continue
-		}
-		if err != nil {
-			conflict = true
-			continue
-		}
-		hash := outputContentHash(data)
-		precondition, known := preconditions[path]
-		if known && precondition.MustExist && hash == precondition.ContentHash {
-			continue
-		}
-		// A candidate at only some write targets is an ambiguous partial install.
-		// Never delete it automatically; preserve the transaction for manual recovery.
-		conflict = true
-	}
-	for _, path := range record.Deletes {
-		precondition, known := preconditions[path]
-		if !known || !precondition.MustExist {
-			conflict = true
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(rootPath, filepath.FromSlash(path)))
-		if err != nil || outputContentHash(data) != precondition.ContentHash {
-			conflict = true
-		}
-	}
-
+	backedUp := make(map[string]struct{})
 	backupPath := filepath.Join(txPath, transactionBackup)
 	_ = filepath.WalkDir(backupPath, func(current string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
+		if walkErr != nil {
+			if current != backupPath || !errors.Is(walkErr, os.ErrNotExist) {
+				conflict = true
+			}
+			return nil
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		relative, err := filepath.Rel(backupPath, current)
@@ -469,32 +511,74 @@ func recoverHashedTransaction(rootPath, txPath string, record journal, targets m
 			conflict = true
 			return nil
 		}
-		backup, backupErr := os.ReadFile(current)
-		if backupErr != nil || outputContentHash(backup) != precondition.ContentHash {
+		backup, err := os.ReadFile(current)
+		if err != nil || outputContentHash(backup) != precondition.ContentHash {
 			conflict = true
 			return nil
 		}
-		destination := filepath.Join(rootPath, filepath.FromSlash(relative))
-		if live, err := os.ReadFile(destination); err == nil {
-			if bytes.Equal(live, backup) {
-				return nil
-			}
-			conflict = true
-			return nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			conflict = true
-			return nil
-		}
-		// Crash recovery never restores repository content from the journal-owned
-		// backup tree because the journal itself cannot prove authenticity.
-		conflict = true
+		backedUp[relative] = struct{}{}
 		return nil
 	})
+
+	installed := make(map[string]string)
+	for _, path := range record.Writes {
+		candidateHash, hasCandidateHash := record.WriteHashes[path]
+		precondition, known := preconditions[path]
+		if !hasCandidateHash || !known {
+			conflict = true
+			continue
+		}
+		fullPath := filepath.Join(rootPath, filepath.FromSlash(path))
+		data, err := os.ReadFile(fullPath)
+		if errors.Is(err, os.ErrNotExist) {
+			if precondition.MustExist {
+				if _, exists := backedUp[path]; !exists {
+					conflict = true
+				}
+			}
+			continue
+		}
+		if err != nil {
+			conflict = true
+			continue
+		}
+		hash := outputContentHash(data)
+		if precondition.MustExist && hash == precondition.ContentHash {
+			continue
+		}
+		if hash == candidateHash {
+			installed[path] = candidateHash
+			if precondition.MustExist {
+				if _, exists := backedUp[path]; !exists {
+					conflict = true
+				}
+			}
+			continue
+		}
+		conflict = true
+	}
+	for _, path := range record.Deletes {
+		precondition, known := preconditions[path]
+		if !known || !precondition.MustExist {
+			conflict = true
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(rootPath, filepath.FromSlash(path)))
+		if errors.Is(err, os.ErrNotExist) {
+			if _, exists := backedUp[path]; !exists {
+				conflict = true
+			}
+			continue
+		}
+		if err != nil || outputContentHash(data) != precondition.ContentHash {
+			conflict = true
+		}
+	}
 	if conflict {
 		_ = writeFileSynced(filepath.Join(txPath, transactionConflict), []byte("conflict\n"))
 		return fmt.Errorf("transaction has an output ownership conflict; backups were preserved")
 	}
-	return os.RemoveAll(txPath)
+	return rollbackRuntime(rootPath, txPath, installed, targets)
 }
 
 func validateRecoveryJournal(record journal, docsDir, statePath string) (map[string]struct{}, error) {
@@ -557,7 +641,7 @@ func validateRecoveryPath(path, docsDir, statePath string) error {
 
 // rollbackRuntime restores backups only when doing so cannot overwrite a path changed
 // concurrently. On conflict it preserves both the visible path and backup for manual
-// recovery, and writes a marker that prevents automatic recovery from discarding either.
+// recovery, and writes a marker recording that the rollback needs to be retried.
 func rollbackRuntime(rootPath, txPath string, installed map[string]string, targets map[string]struct{}) error {
 	conflict := false
 	quarantineRoot, err := os.MkdirTemp(txPath, "rollback-installed-")
@@ -588,7 +672,13 @@ func rollbackRuntime(rootPath, txPath string, installed map[string]string, targe
 
 	backupPath := filepath.Join(txPath, transactionBackup)
 	_ = filepath.WalkDir(backupPath, func(current string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
+		if walkErr != nil {
+			if current != backupPath || !errors.Is(walkErr, os.ErrNotExist) {
+				conflict = true
+			}
+			return nil
+		}
+		if entry.IsDir() {
 			return nil
 		}
 		relative, err := filepath.Rel(backupPath, current)
@@ -603,6 +693,11 @@ func rollbackRuntime(rootPath, txPath string, installed map[string]string, targe
 		}
 		destination := filepath.Join(rootPath, filepath.FromSlash(relative))
 		if _, err := os.Lstat(destination); err == nil {
+			backup, backupErr := os.ReadFile(current)
+			live, liveErr := os.ReadFile(destination)
+			if backupErr == nil && liveErr == nil && bytes.Equal(live, backup) {
+				return nil
+			}
 			conflict = true
 			return nil
 		} else if !errors.Is(err, os.ErrNotExist) {

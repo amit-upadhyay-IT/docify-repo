@@ -153,7 +153,7 @@ func TestOutputRecoverRollsForwardCommitted(t *testing.T) {
 	}
 }
 
-func TestOutputRecoverPreservesBackupForManualRecovery(t *testing.T) {
+func TestOutputRecoverRestoresBackupAfterInterruptedBackup(t *testing.T) {
 	root := t.TempDir()
 	// A crash after backup moved the original but before candidate installation.
 	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
@@ -167,15 +167,151 @@ func TestOutputRecoverPreservesBackupForManualRecovery(t *testing.T) {
 		t.Fatalf("seed journal: %v", err)
 	}
 	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md", "original")
+	writeUnder(t, txDir, transactionConflict, "conflict\n")
 
-	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err == nil {
-		t.Fatal("Recover() error = nil, want conservative manual recovery")
+	repository := NewOutputRepository()
+	if err := repository.Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("Recover() error = %v", err)
 	}
-	if _, ok := readUnder(t, root, "docs/generated/page.md"); ok {
-		t.Fatal("recovery installed untrusted backup content")
+	if content, ok := readUnder(t, root, "docs/generated/page.md"); !ok || content != "original" {
+		t.Fatalf("page = %q ok=%t, want original restored", content, ok)
 	}
-	if content, ok := readUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/page.md"); !ok || content != "original" {
-		t.Fatalf("backup = %q ok=%t, want preserved", content, ok)
+	if _, err := os.Stat(txDir); !os.IsNotExist(err) {
+		t.Fatalf("transaction directory remains: %v", err)
+	}
+	if err := repository.Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("second Recover() error = %v", err)
+	}
+}
+
+func TestOutputRecoverRollsBackPartialCandidateInstall(t *testing.T) {
+	root := t.TempDir()
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes: []string{
+			"docs/generated/installed.md",
+			"docs/generated/missing.md",
+			"docs/generated/new.md",
+			"docs/generated/untouched.md",
+		},
+		WriteHashes: map[string]string{
+			"docs/generated/installed.md": outputTestHash("installed candidate"),
+			"docs/generated/missing.md":   outputTestHash("missing candidate"),
+			"docs/generated/new.md":       outputTestHash("new candidate"),
+			"docs/generated/untouched.md": outputTestHash("untouched candidate"),
+		},
+		Deletes: []string{"docs/generated/deleted.md"},
+		Preconditions: []sharedmodel.OutputPrecondition{
+			{Path: "docs/generated/deleted.md", MustExist: true, ContentHash: outputTestHash("deleted original")},
+			{Path: "docs/generated/installed.md", MustExist: true, ContentHash: outputTestHash("installed original")},
+			{Path: "docs/generated/missing.md", MustExist: true, ContentHash: outputTestHash("missing original")},
+			{Path: "docs/generated/new.md"},
+			{Path: "docs/generated/untouched.md", MustExist: true, ContentHash: outputTestHash("untouched original")},
+		},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	writeUnder(t, root, "docs/generated/installed.md", "installed candidate")
+	writeUnder(t, root, "docs/generated/new.md", "new candidate")
+	writeUnder(t, root, "docs/generated/untouched.md", "untouched original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/deleted.md", "deleted original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/installed.md", "installed original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/missing.md", "missing original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/untouched.md", "untouched original")
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	if content, ok := readUnder(t, root, "docs/generated/installed.md"); !ok || content != "installed original" {
+		t.Fatalf("installed.md = %q ok=%t, want original restored", content, ok)
+	}
+	if content, ok := readUnder(t, root, "docs/generated/missing.md"); !ok || content != "missing original" {
+		t.Fatalf("missing.md = %q ok=%t, want original restored", content, ok)
+	}
+	if content, ok := readUnder(t, root, "docs/generated/deleted.md"); !ok || content != "deleted original" {
+		t.Fatalf("deleted.md = %q ok=%t, want original restored", content, ok)
+	}
+	if content, ok := readUnder(t, root, "docs/generated/untouched.md"); !ok || content != "untouched original" {
+		t.Fatalf("untouched.md = %q ok=%t, want original preserved", content, ok)
+	}
+	if _, ok := readUnder(t, root, "docs/generated/new.md"); ok {
+		t.Fatal("new candidate remains after rollback")
+	}
+	if _, err := os.Stat(txDir); !os.IsNotExist(err) {
+		t.Fatalf("transaction directory remains: %v", err)
+	}
+}
+
+func TestOutputRecoverRollsBackLegacyInterruptedBackup(t *testing.T) {
+	root := t.TempDir()
+	writeUnder(t, root, "docs/generated/untouched.md", "untouched original")
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes:  []string{"docs/generated/backed-up.md", "docs/generated/untouched.md", "docs/generated/new.md"},
+		Deletes: []string{"docs/generated/deleted.md"},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	writeUnder(t, filepath.Join(txDir, transactionStaging), "docs/generated/backed-up.md", "backed-up candidate")
+	writeUnder(t, filepath.Join(txDir, transactionStaging), "docs/generated/untouched.md", "untouched candidate")
+	writeUnder(t, filepath.Join(txDir, transactionStaging), "docs/generated/new.md", "new candidate")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/backed-up.md", "backed-up original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/deleted.md", "deleted original")
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	for path, want := range map[string]string{
+		"docs/generated/backed-up.md": "backed-up original",
+		"docs/generated/deleted.md":   "deleted original",
+		"docs/generated/untouched.md": "untouched original",
+	} {
+		if content, ok := readUnder(t, root, path); !ok || content != want {
+			t.Errorf("%s = %q ok=%t, want %q", path, content, ok, want)
+		}
+	}
+	if _, ok := readUnder(t, root, "docs/generated/new.md"); ok {
+		t.Fatal("pending new candidate was installed during recovery")
+	}
+	if _, err := os.Stat(txDir); !os.IsNotExist(err) {
+		t.Fatalf("transaction directory remains: %v", err)
+	}
+}
+
+func TestOutputRecoverRollsBackLegacyPartialInstall(t *testing.T) {
+	root := t.TempDir()
+	txDir := filepath.Join(root, filepath.FromSlash(transactionDir))
+	if err := writeJournal(txDir, journal{
+		Writes:  []string{"docs/generated/installed.md", "docs/generated/pending.md", "docs/generated/new.md"},
+		Deletes: []string{"docs/generated/deleted.md"},
+	}); err != nil {
+		t.Fatalf("seed journal: %v", err)
+	}
+	writeUnder(t, filepath.Join(txDir, transactionStaging), "docs/generated/pending.md", "pending candidate")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/installed.md", "installed original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/pending.md", "pending original")
+	writeUnder(t, filepath.Join(txDir, transactionBackup), "docs/generated/deleted.md", "deleted original")
+	writeUnder(t, root, "docs/generated/installed.md", "installed candidate")
+	writeUnder(t, root, "docs/generated/new.md", "new candidate")
+	writeUnder(t, txDir, transactionConflict, "conflict\n")
+
+	if err := NewOutputRepository().Recover(context.Background(), root, "docs/generated", ".docify/state.json"); err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	for path, want := range map[string]string{
+		"docs/generated/deleted.md":   "deleted original",
+		"docs/generated/installed.md": "installed original",
+		"docs/generated/pending.md":   "pending original",
+	} {
+		if content, ok := readUnder(t, root, path); !ok || content != want {
+			t.Errorf("%s = %q ok=%t, want %q", path, content, ok, want)
+		}
+	}
+	if _, ok := readUnder(t, root, "docs/generated/new.md"); ok {
+		t.Fatal("installed new candidate remains after legacy rollback")
+	}
+	if _, err := os.Stat(txDir); !os.IsNotExist(err) {
+		t.Fatalf("transaction directory remains: %v", err)
 	}
 }
 

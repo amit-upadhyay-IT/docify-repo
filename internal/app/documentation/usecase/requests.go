@@ -203,6 +203,7 @@ type requestPlanningEnvelope struct {
 	APIMode              sharedmodel.APIMode              `json:"api_mode"`
 	StructuredOutputMode sharedmodel.StructuredOutputMode `json:"structured_output_mode"`
 	SchemaName           string                           `json:"schema_name"`
+	Schema               json.RawMessage                  `json:"schema,omitempty"`
 	Messages             []requestPlanningMessage         `json:"messages"`
 }
 
@@ -722,33 +723,43 @@ func repairRawMessage(invalidBody []byte) (json.RawMessage, error) {
 }
 
 // requestContentBytes is the deterministic, provider-neutral encoded request size. It
-// includes message framing, settings, metadata, the trusted prompt-JSON schema
-// instruction exactly once, and fixed provider-envelope headroom. Native schema mode is
-// smaller because it does not JSON-escape the schema inside a message.
+// includes message framing, settings, metadata, the selected structured-output envelope,
+// and fixed provider-envelope headroom. Auto mode reserves the larger prompt-JSON fallback.
 func requestContentBytes(request sharedmodel.GenerationRequest) int64 {
 	return int64(len(requestPlanningBytes(request)) + providerRequestEnvelopeHeadroom)
 }
 
 func requestPlanningBytes(request sharedmodel.GenerationRequest) []byte {
-	messages := make([]requestPlanningMessage, 0, len(request.Messages)+1)
+	structured := request.Settings.StructuredOutputMode
+	if structured != sharedmodel.StructuredOutputJSONSchema {
+		structured = sharedmodel.StructuredOutputPromptJSON
+	}
+	messageCapacity := len(request.Messages)
+	if structured == sharedmodel.StructuredOutputPromptJSON {
+		messageCapacity++
+	}
+	messages := make([]requestPlanningMessage, 0, messageCapacity)
 	schemaInserted := false
 	for _, message := range request.Messages {
-		if !schemaInserted && message.Role != sharedmodel.RoleSystem {
+		if structured == sharedmodel.StructuredOutputPromptJSON && !schemaInserted && message.Role != sharedmodel.RoleSystem {
 			schema := sharedmodel.PromptJSONSchemaMessage(request.Schema)
 			messages = append(messages, requestPlanningMessage{Role: schema.Role, Content: schema.Content})
 			schemaInserted = true
 		}
 		messages = append(messages, requestPlanningMessage{Role: message.Role, Content: message.Content})
 	}
-	if !schemaInserted {
+	if structured == sharedmodel.StructuredOutputPromptJSON && !schemaInserted {
 		schema := sharedmodel.PromptJSONSchemaMessage(request.Schema)
 		messages = append(messages, requestPlanningMessage{Role: schema.Role, Content: schema.Content})
+	}
+	var nativeSchema json.RawMessage
+	if structured == sharedmodel.StructuredOutputJSONSchema {
+		nativeSchema = append(json.RawMessage(nil), request.Schema...)
 	}
 	envelope := requestPlanningEnvelope{
 		Model: request.Settings.Model, Temperature: request.Settings.Temperature,
 		MaxOutputTokens: request.Settings.MaxOutputTokens, APIMode: request.Settings.APIMode,
-		StructuredOutputMode: sharedmodel.StructuredOutputPromptJSON,
-		SchemaName:           request.SchemaName, Messages: messages,
+		StructuredOutputMode: structured, SchemaName: request.SchemaName, Schema: nativeSchema, Messages: messages,
 	}
 	encoded, _ := marshalRequestJSON(envelope)
 	return encoded

@@ -284,6 +284,43 @@ func TestRequestContentBytesCountsMessagesAndSchemaFallbackOnce(t *testing.T) {
 	}
 }
 
+func TestRequestContentBytesUsesConfiguredStructuredMode(t *testing.T) {
+	request := sharedmodel.GenerationRequest{
+		SchemaName: "component_dossier",
+		Schema:     []byte(`{"type":"object","properties":{"description":{"type":"string"}},"required":["description"]}`),
+		Settings: sharedmodel.GenerationSettings{
+			Model: "test-model", MaxOutputTokens: 8192, StructuredOutputMode: sharedmodel.StructuredOutputJSONSchema,
+		},
+		Messages: []sharedmodel.Message{
+			{Role: sharedmodel.RoleSystem, Content: "system"},
+			{Role: sharedmodel.RoleUser, Content: "user"},
+		},
+	}
+	strictBytes := requestContentBytes(request)
+	strictEnvelope := string(requestPlanningBytes(request))
+	if strings.Contains(strictEnvelope, "Trusted JSON output contract") || !strings.Contains(strictEnvelope, `"schema":{"type":"object"`) {
+		t.Fatalf("strict-schema planning envelope = %s", strictEnvelope)
+	}
+
+	request.Settings.StructuredOutputMode = sharedmodel.StructuredOutputPromptJSON
+	promptBytes := requestContentBytes(request)
+	if promptBytes <= strictBytes {
+		t.Fatalf("prompt-JSON request bytes = %d, want more than strict-schema bytes %d", promptBytes, strictBytes)
+	}
+	if err := validateFragmentRequestSize(request, strictBytes); err == nil {
+		t.Fatal("prompt-JSON request unexpectedly fits the strict-schema byte boundary")
+	}
+
+	request.Settings.StructuredOutputMode = sharedmodel.StructuredOutputAuto
+	if autoBytes := requestContentBytes(request); autoBytes != promptBytes {
+		t.Fatalf("auto request bytes = %d, want prompt-JSON fallback bytes %d", autoBytes, promptBytes)
+	}
+	request.Settings.StructuredOutputMode = sharedmodel.StructuredOutputJSONSchema
+	if err := validateFragmentRequestSize(request, strictBytes); err != nil {
+		t.Fatalf("strict-schema request rejected at exact byte boundary: %v", err)
+	}
+}
+
 func TestMarshalRequestJSONDisablesHTMLExpansion(t *testing.T) {
 	encoded, err := marshalRequestJSON("<>&")
 	if err != nil {
