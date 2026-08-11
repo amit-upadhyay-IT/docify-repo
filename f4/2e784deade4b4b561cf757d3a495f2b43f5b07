@@ -1,0 +1,31 @@
+internal/app/documentation/usecase/requests_test.go
+  s_670ac519f31856::t_51f5467e3d6b2b 287-323
+internal/repository/filesystem/output_test.go
+  s_670ac519f31856::t_58211f7212d78c 195,201,203,205,209,216-217,220,230-235
+  s_670ac519f31856::t_4d487865ca9f3f 156,170,172-194,196-200,202,204,206-208,210-215,218-219,221-229,236-241
+  s_670ac519f31856::t_ec20c5dc690805 243,245-277,279-314
+  s_670ac519f31856::t_ecf267aed131a4 244
+internal/repository/filesystem/output.go
+  s_670ac519f31856::t_b1435afcb8b020 367,487-491,494,496,514-515,519-527,529-541,543-556,559-576,581,675-681,696-700
+  s_670ac519f31856::t_d781065e89e261 381-383,388-454
+  s_670ac519f31856::t_4d487865ca9f3f 644
+  s_670ac519f31856::t_040040bd20e9bf 455-456
+internal/app/documentation/usecase/requests.go
+  s_670ac519f31856::t_51f5467e3d6b2b 206,726-727,733-741,744,751,755-758,762
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "f42e784deade4b4b561cf757d3a495f2b43f5b07",
+  "prompts": {},
+  "sessions": {
+    "s_670ac519f31856": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_00e9bd3e7ffezcQRF9S26eTnUT",
+        "model": "gpt-5-6-sol"
+      },
+      "human_author": "amit-upadhyay-IT <amitupadhyayemail@gmail.com>"
+    }
+  }
+}
