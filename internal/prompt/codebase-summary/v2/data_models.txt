@@ -1,0 +1,6 @@
+Fragment kind: data_models. Return only data model items for target.component_key.
+Return at most 1 item with
+at most 3 fields and 2 relationships. Names and types are at most 100 bytes,
+model descriptions at most 400 bytes, nested descriptions at most 200 bytes, and
+the item cites one or two paths of at most 512 bytes. Use only schema enums. Do
+not return architecture, interfaces, workflows, dependencies, gaps, or diagrams.

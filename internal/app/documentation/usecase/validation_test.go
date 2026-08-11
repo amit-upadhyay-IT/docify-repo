@@ -64,6 +64,19 @@ func TestValidateDossierRejectsUnknownField(t *testing.T) {
 	}
 }
 
+func TestValidateDossierRejectsMissingRequiredSection(t *testing.T) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(validDossierJSON(t), &object); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	delete(object, "workflows")
+	body, _ := json.Marshal(object)
+	result := validateDossier(body, evidence(), catalog())
+	if !hasIssue(result, issueMissingField) {
+		t.Fatalf("issues = %+v, want missing_field", result.issues)
+	}
+}
+
 func TestValidateDossierRejectsUnknownEvidencePath(t *testing.T) {
 	body := replaceField(t, validDossierJSON(t), func(d *sharedmodel.ComponentDossier) {
 		d.Architecture[0].SourcePaths = []string{"services/other/secret.go"}
@@ -81,6 +94,16 @@ func TestValidateDossierRejectsUnknownComponentKey(t *testing.T) {
 	result := validateDossier(body, evidence(), catalog())
 	if !hasIssue(result, issueUnknownComponent) {
 		t.Fatalf("issues = %+v, want unknown_component_key", result.issues)
+	}
+}
+
+func TestValidateDossierRejectsInexactComponentKey(t *testing.T) {
+	body := replaceField(t, validDossierJSON(t), func(d *sharedmodel.ComponentDossier) {
+		d.Dependencies[0].ComponentKey = " services/billing "
+	})
+	result := validateDossier(body, evidence(), catalog())
+	if !hasIssue(result, issueInvalidValue) {
+		t.Fatalf("issues = %+v, want invalid_value", result.issues)
 	}
 }
 
@@ -130,7 +153,7 @@ func TestValidateDossierRejectsDiagramContamination(t *testing.T) {
 
 func TestValidateDossierRejectsDanglingDiagramReference(t *testing.T) {
 	body := replaceField(t, validDossierJSON(t), func(d *sharedmodel.ComponentDossier) {
-		d.Diagrams[0].Edges = []sharedmodel.FlowchartEdge{{From: "a", To: "missing"}}
+		d.Diagrams[0].Edges = []sharedmodel.FlowchartEdge{{From: "a", To: "missing", Label: "continues"}}
 	})
 	result := validateDossier(body, evidence(), catalog())
 	if !hasIssue(result, issueDiagramReference) {

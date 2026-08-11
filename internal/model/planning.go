@@ -66,6 +66,8 @@ const (
 type ComponentBatch struct {
 	Index              int      `json:"index"`
 	Count              int      `json:"count"`
+	ChunkIndex         int      `json:"chunk_index,omitempty"`
+	ChunkCount         int      `json:"chunk_count,omitempty"`
 	SourcePaths        []string `json:"source_paths"`
 	SourceBytes        int64    `json:"source_bytes"`
 	RequestBytes       int64    `json:"request_bytes"`
@@ -73,33 +75,75 @@ type ComponentBatch struct {
 	TypicalTokens      int64    `json:"typical_tokens"`
 }
 
+// FragmentEstimate reports deterministic map-call and byte estimates for one
+// fragment kind. Fallback fields are populated only when auto plans fragments as
+// a contingent fast-path fallback rather than as primary work.
+type FragmentEstimate struct {
+	Kind                      FragmentKind `json:"kind"`
+	PlannedCalls              int          `json:"planned_calls"`
+	FallbackCalls             int          `json:"fallback_calls"`
+	PlannedRequestBytes       int64        `json:"planned_request_bytes"`
+	FallbackRequestBytes      int64        `json:"fallback_request_bytes"`
+	MaximumRepairRequestBytes int64        `json:"maximum_repair_request_bytes"`
+}
+
 type AffectedComponent struct {
-	Key                   string           `json:"key"`
-	RootComponent         bool             `json:"root_component,omitempty"`
-	Document              string           `json:"document"`
-	Action                ComponentAction  `json:"action"`
-	Reasons               []string         `json:"reasons"`
-	ExistedBefore         bool             `json:"existed_before"`
-	ExistsNow             bool             `json:"exists_now"`
-	InputHash             string           `json:"input_hash,omitempty"`
-	Batches               []ComponentBatch `json:"batches,omitempty"`
-	SynthesisRequestBytes int64            `json:"synthesis_request_bytes,omitempty"`
+	Key                   string             `json:"key"`
+	RootComponent         bool               `json:"root_component,omitempty"`
+	Document              string             `json:"document"`
+	Action                ComponentAction    `json:"action"`
+	Reasons               []string           `json:"reasons"`
+	ExistedBefore         bool               `json:"existed_before"`
+	ExistsNow             bool               `json:"exists_now"`
+	InputHash             string             `json:"input_hash,omitempty"`
+	GenerationStrategy    string             `json:"generation_strategy,omitempty"`
+	FragmentFallbackPlan  bool               `json:"fragment_fallback_plan,omitempty"`
+	FragmentFallback      bool               `json:"fragment_fallback,omitempty"`
+	Batches               []ComponentBatch   `json:"batches,omitempty"`
+	Fragments             []FragmentEstimate `json:"fragments,omitempty"`
+	SynthesisRequestBytes int64              `json:"synthesis_request_bytes,omitempty"`
+	OverviewRequestBytes  int64              `json:"overview_reducer_request_bytes,omitempty"`
+	OverviewRepairBytes   int64              `json:"overview_reducer_maximum_repair_request_bytes,omitempty"`
+	DiagramRequestBytes   int64              `json:"diagram_reducer_request_bytes,omitempty"`
+	DiagramRepairBytes    int64              `json:"diagram_reducer_maximum_repair_request_bytes,omitempty"`
 }
 
 type CallEstimate struct {
-	Normal                   int   `json:"normal"`
-	Batch                    int   `json:"batch"`
-	Synthesis                int   `json:"synthesis"`
-	Primary                  int   `json:"primary"`
-	MaximumRepair            int   `json:"maximum_repair"`
-	MaximumTransportFallback int   `json:"maximum_transport_fallback"`
-	RequestBytes             int64 `json:"request_bytes"`
-	ConservativeTokens       int64 `json:"conservative_tokens"`
-	TypicalTokens            int64 `json:"typical_tokens"`
+	Normal                         int                `json:"normal"`
+	DossierFastPath                int                `json:"dossier_fast_path"`
+	Batch                          int                `json:"batch"`
+	Synthesis                      int                `json:"synthesis"`
+	Fragment                       int                `json:"fragment"`
+	OverviewReducer                int                `json:"overview_reducer"`
+	DiagramReducer                 int                `json:"diagram_reducer"`
+	Fragments                      []FragmentEstimate `json:"fragments,omitempty"`
+	Primary                        int                `json:"primary"`
+	TypicalLogical                 int                `json:"typical_logical"`
+	TypicalTruncationFallbackCalls int                `json:"typical_truncation_fallback_calls"`
+	MaximumRepair                  int                `json:"maximum_repair"`
+	MaximumFragmentRepairCalls     int                `json:"maximum_fragment_repair_calls"`
+	MaximumTruncationFallbackCalls int                `json:"maximum_truncation_fallback_calls"`
+	MaximumSourceSplitCalls        int                `json:"maximum_source_split_calls"`
+	MaximumLogical                 int                `json:"maximum_logical"`
+	MaximumTransportFallback       int                `json:"maximum_transport_fallback"`
+	StructuredModesAttempted       int                `json:"structured_modes_attempted"`
+	TransportRetries               int                `json:"transport_retries"`
+	MaximumHTTPAttempts            int                `json:"maximum_http_attempts"`
+	RequestBytes                   int64              `json:"request_bytes"`
+	FallbackRequestBytes           int64              `json:"fallback_request_bytes"`
+	OverviewRequestBytes           int64              `json:"overview_reducer_request_bytes"`
+	OverviewFallbackBytes          int64              `json:"overview_reducer_fallback_request_bytes"`
+	OverviewRepairBytes            int64              `json:"overview_reducer_maximum_repair_request_bytes"`
+	DiagramRequestBytes            int64              `json:"diagram_reducer_request_bytes"`
+	DiagramFallbackBytes           int64              `json:"diagram_reducer_fallback_request_bytes"`
+	DiagramRepairBytes             int64              `json:"diagram_reducer_maximum_repair_request_bytes"`
+	ConservativeTokens             int64              `json:"conservative_tokens"`
+	TypicalTokens                  int64              `json:"typical_tokens"`
 }
 
 type GenerationPlan struct {
 	Mode               string              `json:"mode"`
+	GenerationStrategy string              `json:"generation_strategy"`
 	StateStatus        string              `json:"state_status"`
 	BaseSHA            string              `json:"base_sha,omitempty"`
 	HeadSHA            string              `json:"head_sha,omitempty"`

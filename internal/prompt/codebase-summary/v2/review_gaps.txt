@@ -1,0 +1,5 @@
+Fragment kind: review_gaps. Return only evidence gaps and uncertainties for
+target.component_key. Return at
+most 2 items. Descriptions are at most 400 bytes, recommendations at most 200
+bytes, and each item may cite zero, one, or two paths of at most 512 bytes. Use
+only schema enums. Do not repeat supported facts or return other sections.

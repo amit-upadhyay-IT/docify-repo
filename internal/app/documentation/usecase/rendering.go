@@ -12,7 +12,7 @@ import (
 // renderVersion changes whenever any local rendering rule, template, marker format, or
 // Mermaid emission changes. It participates in state compatibility so a renderer change
 // forces regeneration.
-const renderVersion = "v1"
+const renderVersion = "v2"
 
 // Topic identifiers used in ownership markers. They are stable and versioned by
 // renderVersion.

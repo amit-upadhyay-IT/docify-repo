@@ -50,9 +50,10 @@ type ComponentsConfig struct {
 }
 
 type DocumentationConfig struct {
-	Profile  string `yaml:"profile"`
-	Audience string `yaml:"audience"`
-	Mermaid  bool   `yaml:"mermaid"`
+	Profile            string `yaml:"profile"`
+	Audience           string `yaml:"audience"`
+	Mermaid            bool   `yaml:"mermaid"`
+	GenerationStrategy string `yaml:"generation_strategy"`
 }
 
 type LLMConfig struct {
@@ -62,10 +63,13 @@ type LLMConfig struct {
 	Model                string  `yaml:"model"`
 	Temperature          float64 `yaml:"temperature"`
 	MaxOutputTokens      int     `yaml:"max_output_tokens"`
+	MaxResponseBytes     int64   `yaml:"max_response_bytes"`
 	StructuredOutputMode string  `yaml:"structured_output_mode"`
 	Timeout              string  `yaml:"timeout"`
 	Retries              int     `yaml:"retries"`
 	Concurrency          int     `yaml:"concurrency"`
+	FragmentCallLimit    int     `yaml:"fragment_call_limit_per_component"`
+	FragmentSplitDepth   int     `yaml:"fragment_split_depth"`
 }
 
 type PublishingConfig struct {

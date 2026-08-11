@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v2/overview-reducer",
+  "title": "component_overview_reducer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "purpose"],
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "purpose": { "type": "string", "minLength": 1, "maxLength": 400 }
+  }
+}

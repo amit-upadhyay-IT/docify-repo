@@ -1,7 +1,10 @@
 package usecase
 
 import (
+	"fmt"
+	"net/url"
 	"strings"
+	"unicode"
 )
 
 // markdownInlineEscaper neutralizes the inline Markdown metacharacters that could appear
@@ -49,7 +52,40 @@ func docDepth(docPath string) int {
 // climbs out of the generated tree to the repository root and then down to the file.
 func sourceLink(docPath, evidencePath string) string {
 	prefix := strings.Repeat("../", docDepth(docPath))
-	return "[`" + evidencePath + "`](" + prefix + evidencePath + ")"
+	segments := strings.Split(evidencePath, "/")
+	for index, segment := range segments {
+		segments[index] = url.PathEscape(segment)
+	}
+	return "[" + inlineCodePath(evidencePath) + "](" + prefix + strings.Join(segments, "/") + ")"
+}
+
+func inlineCodePath(value string) string {
+	var safe strings.Builder
+	for _, character := range value {
+		if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) {
+			safe.WriteString(fmt.Sprintf("\\u{%X}", character))
+			continue
+		}
+		safe.WriteRune(character)
+	}
+	value = safe.String()
+	longest := 0
+	current := 0
+	for _, character := range value {
+		if character == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+		} else {
+			current = 0
+		}
+	}
+	if longest == 0 {
+		return "`" + value + "`"
+	}
+	fence := strings.Repeat("`", longest+1)
+	return fence + " " + value + " " + fence
 }
 
 // sourcePathsLine renders a sorted, comma-separated list of source links for a set of

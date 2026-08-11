@@ -32,7 +32,7 @@ func (u *Usecase) Check(ctx context.Context, input documentationmodel.CheckInput
 
 	// Complete any transaction a previous run left interrupted so the comparison reflects a
 	// consistent installed tree. This never generates output.
-	if err := u.output.Recover(ctx, planInput.WorkingDirectory); err != nil {
+	if err := u.output.Recover(ctx, planInput.WorkingDirectory, planInput.SourcePolicy.DocsDir, planInput.SourcePolicy.StatePath); err != nil {
 		return documentationmodel.ResultSummary{}, outputValidationError{fmt.Sprintf("recover interrupted transaction: %v", err)}
 	}
 
@@ -86,10 +86,16 @@ func (u *Usecase) Check(ctx context.Context, input documentationmodel.CheckInput
 // handler can still print it before the process exits nonzero.
 func (u *Usecase) finishCheck(ctx context.Context, input documentationmodel.PlanInput, summary documentationmodel.ResultSummary, inspection *installedInspection, status string, checkErr error) (documentationmodel.ResultSummary, error) {
 	summary.Status = status
+	if checkErr != nil {
+		// The stale result is primary. A diagnostic report failure must not turn
+		// a deterministic exit-code-2 result into an output error.
+		_ = u.writeRunReport(ctx, input, summary, inspection)
+		return summary, checkErr
+	}
 	if reportErr := u.writeRunReport(ctx, input, summary, inspection); reportErr != nil {
 		return documentationmodel.ResultSummary{}, reportErr
 	}
-	return summary, checkErr
+	return summary, nil
 }
 
 func planInputFromCheck(input documentationmodel.CheckInput) documentationmodel.PlanInput {

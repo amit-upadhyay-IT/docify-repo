@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codebase-summary/v2/workflows-fragment",
+  "title": "component_fragment_workflows",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["complete", "items"],
+  "properties": {
+    "complete": { "type": "boolean" },
+    "omitted_count": { "type": "integer", "minimum": 0, "maximum": 10000 },
+    "items": {
+      "type": "array",
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "steps", "source_paths"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 400 },
+          "steps": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["actor", "action", "target"],
+              "properties": {
+                "actor": { "type": "string", "minLength": 1, "maxLength": 100 },
+                "action": { "type": "string", "minLength": 1, "maxLength": 200 },
+                "target": { "type": ["string", "null"], "maxLength": 100 }
+              }
+            }
+          },
+          "source_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+          }
+        }
+      }
+    }
+  }
+}

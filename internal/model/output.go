@@ -36,4 +36,14 @@ type OutputTransaction struct {
 	Writes []RenderedDocument
 	// Deletes are repository-relative paths to remove.
 	Deletes []string
+	// Preconditions describe the installed files observed during ownership
+	// validation. The repository verifies them immediately before mutation.
+	Preconditions []OutputPrecondition
+}
+
+// OutputPrecondition is a content-hash compare-and-swap guard for one installed path.
+type OutputPrecondition struct {
+	Path        string
+	MustExist   bool
+	ContentHash string
 }

@@ -1,0 +1,5 @@
+Fragment kind: dependencies. Return only dependency items for target.component_key.
+Return at most 2 items.
+Names are at most 100 bytes, purposes at most 200 bytes, component keys and paths
+at most 512 bytes, and each item cites one or two paths. Use only schema enums and
+catalog component keys. Do not return other sections.

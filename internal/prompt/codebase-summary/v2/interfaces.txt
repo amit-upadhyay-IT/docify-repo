@@ -1,0 +1,5 @@
+Fragment kind: interfaces. Return only interface items for target.component_key.
+Return at most 2 items.
+Each name is at most 100 bytes, each description at most 400 bytes, and each item
+cites one or two paths of at most 512 bytes. Use only the schema enums. Do not
+return architecture, models, workflows, dependencies, review gaps, or diagrams.

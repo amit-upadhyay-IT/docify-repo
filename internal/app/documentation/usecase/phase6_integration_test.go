@@ -2,6 +2,7 @@ package usecase_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"strings"
@@ -63,11 +64,15 @@ func (f *fakePullRequests) UpdatePullRequest(_ context.Context, number int, cont
 type fakeGitPublisher struct {
 	tip           string
 	commitChanged bool
+	prepareErr    error
 	pushErr       error
 	pushes        int
 }
 
 func (f *fakeGitPublisher) PrepareDocumentationBranch(_ context.Context, _ sharedmodel.BranchPreparation) (sharedmodel.PreparedBranch, error) {
+	if f.prepareErr != nil {
+		return sharedmodel.PreparedBranch{}, f.prepareErr
+	}
 	return sharedmodel.PreparedBranch{Existed: false, Tip: f.tip}, nil
 }
 
@@ -305,13 +310,16 @@ func TestPublishRetryAfterPullRequestFailureDoesNotRegenerate(t *testing.T) {
 
 	// First event: the push succeeds but creating the pull request fails.
 	fixture.prs.createErr = errors.New("pull-request API unavailable")
-	_, err := fixture.run(t, head, head)
+	failed, err := fixture.run(t, head, head)
 	if err == nil {
 		t.Fatal("expected the pull-request failure to surface")
 	}
 	var coder exitCoder
 	if !errors.As(err, &coder) || coder.ExitCode() != 7 {
 		t.Fatalf("error = %v, want a publishing failure with exit code 7", err)
+	}
+	if failed.Status != "publish_failed" || failed.Failure == nil || failed.Failure.Category != "publish" || failed.Generation == nil {
+		t.Fatalf("failed publish summary = %+v, want safe partial metadata", failed)
 	}
 	branch := fixture.documentationBranch(t) // the branch was pushed before the PR step failed
 	_ = branch
@@ -367,13 +375,16 @@ func TestPublishNonFastForwardFailsWithoutForce(t *testing.T) {
 		GenerationPolicy: syncInput(dir).GenerationPolicy,
 	}
 
-	_, err := application.Sync(context.Background(), input)
+	result, err := application.Sync(context.Background(), input)
 	if err == nil {
 		t.Fatal("expected a non-fast-forward push to fail the run")
 	}
 	var coder exitCoder
 	if !errors.As(err, &coder) || coder.ExitCode() != 7 {
 		t.Fatalf("error = %v, want a publishing failure with exit code 7", err)
+	}
+	if result.Status != "publish_failed" || result.Failure == nil || result.Failure.Category != "publish" {
+		t.Fatalf("failed push summary = %+v, want safe partial metadata", result)
 	}
 	if !strings.Contains(err.Error(), "fast-forward") {
 		t.Errorf("error = %v, want a non-fast-forward explanation", err)
@@ -383,6 +394,51 @@ func TestPublishNonFastForwardFailsWithoutForce(t *testing.T) {
 	}
 	if prs.creates != 0 {
 		t.Error("a rejected push must not create a pull request")
+	}
+}
+
+func TestPublishPreparationFailureReturnsSafePartialSummary(t *testing.T) {
+	dir := gitTempDir(t)
+	runGit(t, dir, "init", "--quiet")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	hardenRepo(t, dir)
+	writeFile(t, dir, "main.go", "package main\n")
+	runGit(t, dir, "add", "--all")
+	runGit(t, dir, "commit", "--quiet", "-m", "initial")
+	head := gitOutput(t, dir, "rev-parse", "HEAD")
+	generator := &scriptedGenerator{}
+	application := usecase.New(
+		gitrepository.New(gitrepository.Options{WorkingDirectory: dir}), filesystemrepository.NewSourceRepository(),
+		filesystemrepository.NewStateRepository(), generator, filesystemrepository.NewOutputRepository(),
+		usecase.WithPublisher(&fakeGitPublisher{prepareErr: errors.New("prepare failed")}, newFakePullRequests()),
+	)
+	input := syncInput(dir)
+	input.Publisher = "github-pr"
+	input.GitHubRepository = "octo/repo"
+	input.BaseBranch = "main"
+	input.HeadSHA = head
+	input.BaseSHA = head
+	input.GitHubCredentialPresent = true
+
+	result, err := application.Sync(context.Background(), input)
+	if err == nil {
+		t.Fatal("expected preparation failure")
+	}
+	if result.Command != "sync" || result.Status != "publish_failed" || result.Failure == nil || result.Failure.Category != "publish" {
+		t.Fatalf("result = %+v, want safe publish failure", result)
+	}
+	if generator.calls.Load() != 0 {
+		t.Fatalf("preparation failure made %d model calls", generator.calls.Load())
+	}
+	data, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		t.Fatalf("marshal failed summary: %v", marshalErr)
+	}
+	for _, expected := range []string{`"files":[]`, `"components":[]`, `"changes":[]`, `"affected_components":[]`, `"deleted_documents":[]`} {
+		if !strings.Contains(string(data), expected) {
+			t.Errorf("failed summary JSON missing stable array %s: %s", expected, data)
+		}
 	}
 }
 

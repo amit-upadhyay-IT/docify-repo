@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	documentationmodel "docify-repo/internal/app/documentation/model"
 	sharedmodel "docify-repo/internal/model"
@@ -62,6 +63,9 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 	if err != nil {
 		return documentationmodel.ResultSummary{}, sourceError{err: err}
 	}
+	corePlanInput := planInputFromSync(input)
+	corePlanInput.BaseSHA = ""
+	corePlanInput.HeadSHA = ""
 
 	identity := sharedmodel.CommitIdentity{Name: publishCommitName, Email: publishCommitEmail}
 	prepared, err := u.gitPublisher.PrepareDocumentationBranch(ctx, sharedmodel.BranchPreparation{
@@ -73,16 +77,22 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 		Identity:            identity,
 	})
 	if err != nil {
-		return documentationmodel.ResultSummary{}, publishError{fmt.Sprintf("prepare documentation branch: %v", err)}
+		failure := publishError{fmt.Sprintf("prepare documentation branch: %v", err)}
+		summary := documentationmodel.ResultSummary{
+			Command: "sync", Files: []sharedmodel.SourceDecision{},
+			Plan: sharedmodel.GenerationPlan{
+				GenerationStrategy: input.GenerationPolicy.GenerationStrategy,
+				Components:         []sharedmodel.ComponentSummary{}, Changes: []sharedmodel.Change{},
+				AffectedComponents: []sharedmodel.AffectedComponent{}, DeletedDocuments: []string{},
+			},
+		}
+		return u.finishPublishFailure(ctx, corePlanInput, summary, nil, failure), failure
 	}
 
 	// Generate against the prepared branch now checked out in the worktree. Clearing the
 	// event range makes the core read source and pending state from that branch, so an open
 	// pull request's generated sections are retained and only genuinely changed components
 	// regenerate.
-	corePlanInput := planInputFromSync(input)
-	corePlanInput.BaseSHA = ""
-	corePlanInput.HeadSHA = ""
 	generation, err := u.prepareGeneration(ctx, "sync", corePlanInput)
 	if err != nil {
 		return documentationmodel.ResultSummary{}, err
@@ -95,7 +105,7 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 		if prepared.AheadOfBase {
 			content := u.pullRequestContent(repository, branch, baseBranch, input, generation.summary)
 			if err := u.reconcilePullRequest(ctx, content); err != nil {
-				return documentationmodel.ResultSummary{}, err
+				return u.finishPublishFailure(ctx, corePlanInput, generation.summary, nil, err), err
 			}
 		}
 		if err := u.writeRunReport(ctx, corePlanInput, generation.summary, nil); err != nil {
@@ -106,11 +116,18 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 
 	candidate, inspection, err := u.generateCandidate(ctx, generation)
 	if err != nil {
-		return documentationmodel.ResultSummary{}, err
+		return u.finishGenerationFailure(ctx, corePlanInput, generation.summary, candidate, &inspection, err), err
 	}
-	if err := u.installCandidate(ctx, corePlanInput, candidate); err != nil {
-		return documentationmodel.ResultSummary{}, outputValidationError{fmt.Sprintf("install generated output: %v", err)}
+	inspection, err = u.revalidateInstallationOwnership(ctx, generation, inspection)
+	if err != nil {
+		return u.finishGenerationFailure(ctx, corePlanInput, generation.summary, candidate, &inspection, err), err
 	}
+	if err := u.installCandidate(ctx, corePlanInput, candidate, inspection); err != nil {
+		failure := outputValidationError{fmt.Sprintf("install generated output: %v", err)}
+		return u.finishGenerationFailure(ctx, corePlanInput, generation.summary, candidate, &inspection, failure), failure
+	}
+	generation.summary.Generation = candidate.outcome()
+	markFragmentFallbacks(&generation.summary.Plan, candidate.fallbackComponents)
 
 	commit, err := u.gitPublisher.CommitDocumentation(ctx, sharedmodel.DocumentationCommit{
 		DocumentationBranch: branch,
@@ -120,7 +137,8 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 		Identity:            identity,
 	})
 	if err != nil {
-		return documentationmodel.ResultSummary{}, publishError{fmt.Sprintf("commit documentation: %v", err)}
+		failure := publishError{fmt.Sprintf("commit documentation: %v", err)}
+		return u.finishPublishFailure(ctx, corePlanInput, generation.summary, &inspection, failure), failure
 	}
 	if commit.Changed {
 		if err := u.gitPublisher.PushDocumentationBranch(ctx, sharedmodel.PushSpec{
@@ -129,24 +147,40 @@ func (u *Usecase) publishGitHub(ctx context.Context, input documentationmodel.Sy
 			Commit:              commit.Commit,
 		}); err != nil {
 			if errors.Is(err, sharedmodel.ErrNonFastForward) {
-				return documentationmodel.ResultSummary{}, publishError{"documentation branch was updated concurrently; the push was not a fast-forward. Rerun to rebuild on the newer tip."}
+				failure := publishError{"documentation branch was updated concurrently; the push was not a fast-forward. Rerun to rebuild on the newer tip."}
+				return u.finishPublishFailure(ctx, corePlanInput, generation.summary, &inspection, failure), failure
 			}
-			return documentationmodel.ResultSummary{}, publishError{fmt.Sprintf("push documentation branch: %v", err)}
+			failure := publishError{fmt.Sprintf("push documentation branch: %v", err)}
+			return u.finishPublishFailure(ctx, corePlanInput, generation.summary, &inspection, failure), failure
 		}
 	}
 
 	generation.summary.Status = "synced"
-	generation.summary.Generation = candidate.outcome()
 	if commit.Changed || prepared.AheadOfBase {
 		content := u.pullRequestContent(repository, branch, baseBranch, input, generation.summary)
 		if err := u.reconcilePullRequest(ctx, content); err != nil {
-			return documentationmodel.ResultSummary{}, err
+			return u.finishPublishFailure(ctx, corePlanInput, generation.summary, &inspection, err), err
 		}
 	}
 	if err := u.writeRunReport(ctx, corePlanInput, generation.summary, &inspection); err != nil {
 		return documentationmodel.ResultSummary{}, err
 	}
 	return generation.summary, nil
+}
+
+func (u *Usecase) finishPublishFailure(
+	ctx context.Context,
+	input documentationmodel.PlanInput,
+	summary documentationmodel.ResultSummary,
+	inspection *installedInspection,
+	_ error,
+) documentationmodel.ResultSummary {
+	summary.Status = "publish_failed"
+	summary.Failure = &documentationmodel.GenerationFailure{Category: "publish"}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = u.writeRunReport(reportCtx, input, summary, inspection)
+	return summary
 }
 
 // reconcilePullRequest opens the deterministic pull request or updates the existing open one.
@@ -189,10 +223,13 @@ func (u *Usecase) pullRequestContent(repository, branch, baseBranch string, inpu
 func renderPullRequestBody(baseSHA, headSHA string, summary documentationmodel.ResultSummary) string {
 	var builder strings.Builder
 	builder.WriteString("Automated documentation synchronization by docify-repo.\n\n")
-	builder.WriteString(fmt.Sprintf("- Source range: `%s`..`%s`\n", shortSHA(baseSHA), shortSHA(headSHA)))
-	builder.WriteString(fmt.Sprintf("- Plan mode: `%s`\n", summary.Plan.Mode))
+	builder.WriteString(fmt.Sprintf("- Source range: %s..%s\n", inlineCodePath(shortSHA(baseSHA)), inlineCodePath(shortSHA(headSHA))))
+	builder.WriteString(fmt.Sprintf("- Plan mode: %s\n", inlineCodePath(summary.Plan.Mode)))
+	builder.WriteString(fmt.Sprintf("- Generation strategy: %s\n", inlineCodePath(summary.Plan.GenerationStrategy)))
+	builder.WriteString(fmt.Sprintf("- Planned LLM calls: %d typical / %d maximum logical / %d maximum HTTP attempts\n",
+		summary.Plan.Calls.TypicalLogical, summary.Plan.Calls.MaximumLogical, summary.Plan.Calls.MaximumHTTPAttempts))
 	if summary.Plan.StateStatus != "" {
-		builder.WriteString(fmt.Sprintf("- State: `%s`\n", summary.Plan.StateStatus))
+		builder.WriteString(fmt.Sprintf("- State: %s\n", inlineCodePath(summary.Plan.StateStatus)))
 	}
 
 	affected := make([]string, 0, len(summary.Plan.AffectedComponents))
@@ -203,11 +240,16 @@ func renderPullRequestBody(baseSHA, headSHA string, summary documentationmodel.R
 	if len(affected) > 0 {
 		builder.WriteString("\n**Affected components**\n")
 		for _, entry := range affected {
-			builder.WriteString(fmt.Sprintf("- `%s`\n", entry))
+			builder.WriteString(fmt.Sprintf("- %s\n", inlineCodePath(entry)))
 		}
 	}
 
 	if outcome := summary.Generation; outcome != nil {
+		builder.WriteString("\n**LLM generation**\n")
+		builder.WriteString(fmt.Sprintf("- Fragment calls: %d\n", outcome.FragmentCalls))
+		builder.WriteString(fmt.Sprintf("- Repairs: %d\n", outcome.RepairCalls))
+		builder.WriteString(fmt.Sprintf("- Fragment fallbacks: %d\n", outcome.FragmentFallbacks))
+		builder.WriteString(fmt.Sprintf("- Source splits: %d\n", outcome.FragmentSourceSplits))
 		builder.WriteString("\n**Documents**\n")
 		builder.WriteString(fmt.Sprintf("- Added: %d\n", len(outcome.Diff.Added)))
 		builder.WriteString(fmt.Sprintf("- Changed: %d\n", len(outcome.Diff.Changed)))

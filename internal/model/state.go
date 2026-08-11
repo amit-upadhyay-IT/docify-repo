@@ -39,5 +39,6 @@ type StateComponent struct {
 
 type StateLoadResult struct {
 	Missing bool
+	Invalid bool
 	State   State
 }

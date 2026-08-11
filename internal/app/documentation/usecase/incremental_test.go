@@ -57,7 +57,7 @@ func TestResolveOwnershipComputesDeletes(t *testing.T) {
 	existing := sharedmodel.ExistingOutput{GeneratedPaths: []string{"docs/generated/a.md", "docs/generated/gone.md"}}
 	prior := map[string]struct{}{"docs/generated/a.md": {}, "docs/generated/gone.md": {}}
 	candidate := map[string]struct{}{"docs/generated/a.md": {}, "docs/generated/new.md": {}}
-	decision, err := resolveOwnership(existing, prior, true, candidate, false)
+	decision, err := resolveOwnership(existing, prior, true, true, candidate, false)
 	if err != nil {
 		t.Fatalf("resolveOwnership() error = %v", err)
 	}
@@ -69,7 +69,7 @@ func TestResolveOwnershipComputesDeletes(t *testing.T) {
 func TestResolveOwnershipRefusesUnprovenStateWithoutFull(t *testing.T) {
 	existing := sharedmodel.ExistingOutput{GeneratedPaths: []string{"docs/generated/a.md"}}
 	candidate := map[string]struct{}{"docs/generated/a.md": {}}
-	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, candidate, false); err == nil {
+	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, false, candidate, false); err == nil {
 		t.Fatal("resolveOwnership() error = nil, want refusal when ownership is unproven")
 	}
 }
@@ -77,7 +77,7 @@ func TestResolveOwnershipRefusesUnprovenStateWithoutFull(t *testing.T) {
 func TestResolveOwnershipFullRecoveryOverwritesCandidatePaths(t *testing.T) {
 	existing := sharedmodel.ExistingOutput{GeneratedPaths: []string{"docs/generated/a.md"}}
 	candidate := map[string]struct{}{"docs/generated/a.md": {}}
-	decision, err := resolveOwnership(existing, map[string]struct{}{}, false, candidate, true)
+	decision, err := resolveOwnership(existing, map[string]struct{}{}, false, false, candidate, true)
 	if err != nil {
 		t.Fatalf("full recovery error = %v, want success overwriting a reproduced path", err)
 	}
@@ -89,8 +89,25 @@ func TestResolveOwnershipFullRecoveryOverwritesCandidatePaths(t *testing.T) {
 func TestResolveOwnershipFullRecoveryStillRefusesForeignFile(t *testing.T) {
 	existing := sharedmodel.ExistingOutput{GeneratedPaths: []string{"docs/generated/a.md", "docs/generated/foreign.md"}}
 	candidate := map[string]struct{}{"docs/generated/a.md": {}}
-	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, candidate, true); err == nil {
+	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, false, candidate, true); err == nil {
 		t.Fatal("full recovery error = nil, want refusal for a file the candidate does not reproduce")
+	}
+}
+
+func TestResolveOwnershipProtectsExistingStatePath(t *testing.T) {
+	existing := sharedmodel.ExistingOutput{StateExists: true}
+	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, false, map[string]struct{}{}, false); err == nil {
+		t.Fatal("resolveOwnership() error = nil, want refusal for an unproven existing state path")
+	}
+}
+
+func TestResolveOwnershipAllowsDecodedOrExplicitlyRecoveredStatePath(t *testing.T) {
+	existing := sharedmodel.ExistingOutput{StateExists: true}
+	if _, err := resolveOwnership(existing, map[string]struct{}{}, true, false, map[string]struct{}{}, false); err != nil {
+		t.Fatalf("decoded state path error = %v, want success", err)
+	}
+	if _, err := resolveOwnership(existing, map[string]struct{}{}, false, false, map[string]struct{}{}, true); err != nil {
+		t.Fatalf("explicit state recovery error = %v, want success", err)
 	}
 }
 

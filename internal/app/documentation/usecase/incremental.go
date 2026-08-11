@@ -4,18 +4,21 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"reflect"
 	"sort"
 
 	documentationmodel "docify-repo/internal/app/documentation/model"
 	sharedmodel "docify-repo/internal/model"
 )
 
-// installedInspection captures the currently installed generated output and whether it can
-// be trusted for incremental reuse. Integrity holds only when valid prior state proves that
-// every owned document is present, unmodified, and that no unowned file is present.
+// installedInspection captures the currently installed generated output and whether
+// decoded prior state independently proves ownership and integrity. Generation-version
+// compatibility is evaluated by planning and does not invalidate ownership proof.
 type installedInspection struct {
 	existing    sharedmodel.ExistingOutput
 	content     map[string][]byte
+	stateOwned  bool
+	stateHash   string
 	provenState bool
 	integrityOK bool
 	reason      string
@@ -34,10 +37,28 @@ func (u *Usecase) inspectInstalled(ctx context.Context, input documentationmodel
 		return installedInspection{}, outputValidationError{fmt.Sprintf("read installed output: %v", err)}
 	}
 
-	inspection := installedInspection{existing: existing, content: content}
-	_, compatible := stateCompatibility(state)
-	inspection.provenState = !state.Missing && compatible
-	if !inspection.provenState {
+	inspection := installedInspection{existing: existing, content: content, stateOwned: !state.Missing && !state.Invalid}
+	if inspection.stateOwned && !existing.StateExists {
+		return installedInspection{}, outputValidationError{"the configured state file changed during ownership inspection"}
+	}
+	if existing.StateExists {
+		stateContent, err := u.output.ReadInstalled(ctx, input.WorkingDirectory, []string{input.SourcePolicy.StatePath})
+		if err != nil {
+			return installedInspection{}, outputValidationError{fmt.Sprintf("read installed state: %v", err)}
+		}
+		data, ok := stateContent[input.SourcePolicy.StatePath]
+		if !ok {
+			return installedInspection{}, outputValidationError{"the configured state file changed during ownership inspection"}
+		}
+		inspection.stateHash = contentHash(data)
+		if inspection.stateOwned {
+			decoded, err := u.state.Decode(ctx, data)
+			if err != nil || !reflect.DeepEqual(decoded, state) {
+				return installedInspection{}, outputValidationError{"the configured state file changed during ownership inspection"}
+			}
+		}
+	}
+	if !inspection.stateOwned {
 		if len(existing.GeneratedPaths) > 0 {
 			inspection.reason = "no valid prior state proves ownership of the installed documentation"
 		} else {
@@ -46,6 +67,7 @@ func (u *Usecase) inspectInstalled(ctx context.Context, input documentationmodel
 		return inspection, nil
 	}
 	inspection.integrityOK, inspection.reason = verifyInstalledIntegrity(state.State, existing, content)
+	inspection.provenState = inspection.integrityOK
 	return inspection, nil
 }
 

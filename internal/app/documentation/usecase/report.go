@@ -10,12 +10,12 @@ import (
 	sharedmodel "docify-repo/internal/model"
 )
 
-const runReportSchemaVersion = 1
+const runReportSchemaVersion = 5
 
 // writeRunReport writes the structured run report to the configured report path when one
 // is set and an output repository is available. It is a run artifact installed
-// independently of the documentation transaction, so a report write failure is surfaced
-// but never leaves documentation partially installed (it runs after install).
+// independently of the documentation transaction. Callers decide whether a report error
+// is primary on success or best-effort diagnostic output after a generation failure.
 func (u *Usecase) writeRunReport(ctx context.Context, input documentationmodel.PlanInput, summary documentationmodel.ResultSummary, inspection *installedInspection) error {
 	reportPath := input.SourcePolicy.ReportPath
 	if reportPath == "" || u.output == nil {
@@ -38,16 +38,22 @@ func (u *Usecase) writeRunReport(ctx context.Context, input documentationmodel.P
 // stable action labels, counts, and provider usage.
 func buildRunReport(summary documentationmodel.ResultSummary, inspection *installedInspection) documentationmodel.RunReport {
 	report := documentationmodel.RunReport{
-		SchemaVersion: runReportSchemaVersion,
-		Command:       summary.Command,
-		Status:        summary.Status,
-		Mode:          summary.Plan.Mode,
-		StateStatus:   summary.Plan.StateStatus,
-		Noop:          summary.Plan.Noop,
-		BaseSHA:       summary.Plan.BaseSHA,
-		HeadSHA:       summary.Plan.HeadSHA,
-		FullReason:    summary.Plan.FullReason,
-		TrackedPaths:  summary.TrackedPaths,
+		SchemaVersion:      runReportSchemaVersion,
+		Command:            summary.Command,
+		Status:             summary.Status,
+		Mode:               summary.Plan.Mode,
+		StateStatus:        summary.Plan.StateStatus,
+		Noop:               summary.Plan.Noop,
+		BaseSHA:            summary.Plan.BaseSHA,
+		HeadSHA:            summary.Plan.HeadSHA,
+		FullReason:         summary.Plan.FullReason,
+		GenerationStrategy: summary.Plan.GenerationStrategy,
+		PlannedLLM:         summary.Plan.Calls,
+		TrackedPaths:       summary.TrackedPaths,
+		Failure:            summary.Failure,
+		LLM: documentationmodel.ReportLLM{
+			FragmentFallbackComponents: []string{},
+		},
 		IncludedPaths: make([]string, 0),
 		ExcludedPaths: make([]string, 0),
 		Documents:     sharedmodel.OutputDiff{Added: []string{}, Changed: []string{}, Deleted: []string{}, Unchanged: []string{}},
@@ -65,34 +71,53 @@ func buildRunReport(summary documentationmodel.ResultSummary, inspection *instal
 
 	report.AffectedComponents = make([]documentationmodel.ReportAffectedComponent, 0, len(summary.Plan.AffectedComponents))
 	report.DeletedComponents = make([]string, 0)
+	fallbackComponents := make(map[string]struct{})
+	if summary.Generation != nil {
+		for _, key := range summary.Generation.FragmentFallbackComponents {
+			fallbackComponents[key] = struct{}{}
+		}
+	}
 	for _, affected := range summary.Plan.AffectedComponents {
 		if affected.Action == sharedmodel.ComponentDelete {
 			report.DeletedComponents = append(report.DeletedComponents, affected.Key)
 			continue
 		}
+		_, outcomeFallback := fallbackComponents[affected.Key]
+		fragmentFallback := affected.FragmentFallback || outcomeFallback
 		report.AffectedComponents = append(report.AffectedComponents, documentationmodel.ReportAffectedComponent{
-			Key:           affected.Key,
-			RootComponent: affected.RootComponent,
-			Action:        string(affected.Action),
-			Reasons:       append([]string(nil), affected.Reasons...),
+			Key: affected.Key, RootComponent: affected.RootComponent, Action: string(affected.Action),
+			Reasons: append([]string(nil), affected.Reasons...), GenerationStrategy: affected.GenerationStrategy,
+			FragmentFallbackPlan: affected.FragmentFallbackPlan, FragmentFallback: fragmentFallback,
 		})
 	}
 	sort.Strings(report.DeletedComponents)
 
 	if outcome := summary.Generation; outcome != nil {
 		report.LLM = documentationmodel.ReportLLM{
-			NormalCalls:    outcome.NormalCalls,
-			BatchCalls:     outcome.BatchCalls,
-			SynthesisCalls: outcome.SynthesisCalls,
-			RepairCalls:    outcome.RepairCalls,
-			Usage:          outcome.Usage,
+			NormalCalls:                outcome.NormalCalls,
+			BatchCalls:                 outcome.BatchCalls,
+			SynthesisCalls:             outcome.SynthesisCalls,
+			FragmentCalls:              outcome.FragmentCalls,
+			OverviewReducerCalls:       outcome.OverviewReducerCalls,
+			DiagramReducerCalls:        outcome.DiagramReducerCalls,
+			RepairCalls:                outcome.RepairCalls,
+			FragmentFallbacks:          outcome.FragmentFallbacks,
+			FragmentFallbackComponents: append([]string{}, outcome.FragmentFallbackComponents...),
+			FragmentSourceSplits:       outcome.FragmentSourceSplits,
+			FragmentSourceSplitCalls:   outcome.FragmentSourceSplitCalls,
+			SaturatedScopes:            outcome.SaturatedScopes,
+			OverviewFallbacks:          outcome.OverviewFallbacks,
+			DiagramFallbacks:           outcome.DiagramFallbacks,
+			TransportAttempts:          outcome.TransportAttempts,
+			Usage:                      outcome.Usage,
 		}
 		report.Documents = normalizeDiff(outcome.Diff)
-		report.Validation.OutputValidated = true
+		report.Validation.OutputValidated = summary.Status == "synced" ||
+			summary.Status == "publish_failed" && summary.Failure != nil && summary.Failure.Category == "publish"
 	}
 
 	if inspection != nil {
-		report.Validation.IntegrityChecked = inspection.provenState
+		report.Validation.IntegrityChecked = inspection.stateOwned
 		report.Validation.IntegrityOK = inspection.integrityOK
 		if !inspection.integrityOK {
 			report.Validation.Detail = inspection.reason

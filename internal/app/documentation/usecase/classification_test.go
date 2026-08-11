@@ -95,6 +95,34 @@ func TestPlanScansAndClassifiesWithoutReadingDeniedPaths(t *testing.T) {
 	}
 }
 
+func TestFragmentPlanNeverReceivesScannerExcludedOversizedFile(t *testing.T) {
+	entries := []sharedmodel.TrackedEntry{{Path: "main.go", Mode: "100644"}, {Path: "large.go", Mode: "100644"}}
+	worktree := &fakeWorktree{contents: map[string]sharedmodel.FileContent{
+		"main.go":  textContent("main.go", "package main\n"),
+		"large.go": {Path: "large.go", Size: 1000, Data: []byte("package"), Truncated: true},
+	}}
+	application := New(&fakeGitSource{root: "/repository", entries: entries}, worktree, &fakeState{result: sharedmodel.StateLoadResult{Missing: true}}, nil, nil)
+	input := testPlanInput()
+	input.GenerationPolicy.GenerationStrategy = "fragments"
+	input.GenerationPolicy.MaxOutputTokens = fragmentMinimumOutputTokens
+
+	result, err := application.Plan(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	decision := decisionByPath(t, result.Files, "large.go")
+	if decision.Role != sharedmodel.RoleOversized || decision.IncludedAsContext {
+		t.Fatalf("oversized decision = %+v", decision)
+	}
+	for _, component := range result.Plan.Components {
+		for _, path := range component.TriggeringPaths {
+			if path == "large.go" {
+				t.Fatal("scanner-excluded oversized file reached fragment component planning")
+			}
+		}
+	}
+}
+
 func TestPlanRejectsHighConfidenceSecretWithoutExposingValue(t *testing.T) {
 	secret := "AKIA1234567890ABCDEF"
 	worktree := &fakeWorktree{contents: map[string]sharedmodel.FileContent{
@@ -232,11 +260,13 @@ func testPlanInput() documentationmodel.PlanInput {
 		SourcePolicy: testSourcePolicy(),
 		ComponentPolicy: documentationmodel.ComponentPolicy{
 			Strategy: "inferred", MaxContextBytes: 1000, MaxBatchBytes: 500,
-			MaxSupportingBytes: 200, MaxManifestBytes: 200, MaxDiffBytes: 200, MaxRequestBytes: 200_000,
+			MaxSupportingBytes: 200, MaxManifestBytes: 200, MaxDiffBytes: 200, MaxRequestBytes: 500_000,
 		},
 		GenerationPolicy: documentationmodel.GenerationPolicy{
 			Profile: "codebase-summary", Audience: "mixed", Mermaid: true, Provider: "openai-compatible",
-			APIMode: "chat_completions", MaxOutputTokens: 1024, StructuredOutputMode: "auto",
+			GenerationStrategy: "dossier", APIMode: "chat_completions", MaxOutputTokens: 1024,
+			MaxResponseBytes: 65_536, StructuredOutputMode: "auto", TransportRetries: 2,
+			FragmentCallLimit: 80, FragmentSplitDepth: 3,
 		},
 	}
 }

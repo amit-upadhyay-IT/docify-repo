@@ -45,7 +45,7 @@ type OutputRepository interface {
 	ExistingPaths(ctx context.Context, root, docsDir, statePath string) (sharedmodel.ExistingOutput, error)
 	ReadInstalled(ctx context.Context, root string, paths []string) (map[string][]byte, error)
 	Install(ctx context.Context, root string, transaction sharedmodel.OutputTransaction) error
-	Recover(ctx context.Context, root string) error
+	Recover(ctx context.Context, root, docsDir, statePath string) error
 	WriteReport(ctx context.Context, root, reportPath string, data []byte) error
 }
 
@@ -229,7 +229,14 @@ func (u *Usecase) loadTreeState(ctx context.Context, entries []sharedmodel.Track
 		if content.Truncated {
 			return sharedmodel.StateLoadResult{}, fmt.Errorf("state %q exceeds %d bytes", statePath, maximumStateBytes)
 		}
-		return u.state.Decode(ctx, content.Data)
+		result, err := u.state.Decode(ctx, content.Data)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return sharedmodel.StateLoadResult{}, ctxErr
+			}
+			return sharedmodel.StateLoadResult{Invalid: true}, nil
+		}
+		return result, nil
 	}
 	return sharedmodel.StateLoadResult{Missing: true}, nil
 }
