@@ -1,0 +1,11 @@
+version: 1
+
+documentation:
+  generation_strategy: auto
+
+components:
+  max_context_bytes: 500000
+  max_request_bytes: 750000
+
+llm:
+  fragment_call_limit_per_component: 120
